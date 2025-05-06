@@ -1,0 +1,81 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Wildcard ACM certificate for Cognito / CloudFront.
+  ?Despliega este stack SOLO en us-east-1 (N. Virginia)!
+
+############################
+# Parámetros
+############################
+Parameters:
+  ProjectName:
+    Type: String
+    Default: "lince"
+    Description: Prefijo para nombrar recursos
+
+  Env:
+    Type: String
+    AllowedValues: [dev, live]
+    Description: |
+      dev  ? *.lince.zone
+      live ? *.lince.finance
+
+  # Vacío si NO tenemos la zona en Route 53
+  HostedZoneId:
+    Type: String
+    Default: ""
+    Description: Hosted Zone ID (opcional) para validaci?n autom?tica
+
+############################
+# Mapeos
+############################
+Mappings:
+  DomainMap:
+    dev:  { Zone: "lince.zone" }
+    live: { Zone: "lince.finance" }
+
+############################
+# Condiciones
+############################
+Conditions:
+  HasHostedZone: !Not [!Equals [!Ref HostedZoneId, ""]]
+
+############################
+# Recursos
+############################
+Resources:
+  WildcardCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      # Ej.: *.lince.zone   /   *.lince.finance
+      DomainName: !Sub
+        - "*.${Zone}"
+        - Zone: !FindInMap [DomainMap, !Ref Env, Zone]
+
+      SubjectAlternativeNames:
+        - !FindInMap [DomainMap, !Ref Env, Zone]
+
+      ValidationMethod: DNS
+
+      DomainValidationOptions: !If
+        - HasHostedZone
+          - DomainName: !Sub
+              - "*.${Zone}"
+              - Zone: !FindInMap [DomainMap, !Ref Env, Zone]
+            HostedZoneId: !Ref HostedZoneId
+          - DomainName: !FindInMap [DomainMap, !Ref Env, Zone]
+            HostedZoneId: !Ref HostedZoneId
+          !Ref "AWS::NoValue"
+
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-WildcardCert"
+
+############################
+# Salidas
+############################
+Outputs:
+  WildcardCertArn:
+    Description: ARN del certificado wildcard (us-east-1)
+    Value: !Ref WildcardCertificate
+    Export:
+      Name: !Sub "${ProjectName}-${Env}-WildcardCertArn"

@@ -1,0 +1,261 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Lince Auth Service
+
+############################################################
+#                     Parámetros                            #
+############################################################
+Parameters:
+  # Entorno lógico (dev | live)
+  Environment:
+    Type: String
+    AllowedValues: [dev, live]
+
+  # Red / VPC comunes
+  PrivateSubnetOne:
+    Type: String
+    Description: 'ID of private subnet 1'
+  PrivateSubnetTwo:
+    Type: String
+    Description: 'ID of private subnet 2'
+  LambdaSecurityGroup:
+    Type: String
+    Description: 'Security Group ID for Lambdas in the VPC'
+
+  # Dependencias externas
+  UserPoolArnParam:
+    Type: String
+    Description: "ARN for user pool"
+  RedisUrlParam:
+    Type: String
+    Description: 'URL of Redis endpoint (e.g. from SSM)'
+
+############################################################
+#                Valores que SÍ cambian                     #
+############################################################
+Mappings:
+  EnvConfig:
+    dev:
+      DomainBase: lince.zone
+    live:
+      DomainBase: lince.finance
+
+Conditions:
+  IsLive: !Equals [ !Ref Environment, live ]
+
+############################################################
+#                      Globals                              #
+############################################################
+Globals:
+  Function:
+    Runtime: nodejs18.x
+    Timeout: 60
+    MemorySize: 512
+    Architectures: [arm64]
+    VpcConfig:
+      SubnetIds: [!Ref PrivateSubnetOne, !Ref PrivateSubnetTwo]
+      SecurityGroupIds: [!Ref LambdaSecurityGroup]
+    Environment:
+      Variables:
+        NODE_ENV: !Ref Environment
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+        REDIS_URL: !Ref RedisUrlParam
+
+############################################################
+#                       Recursos                            #
+############################################################
+Resources:
+
+  ##########################################################
+  #               Permisos de la Lambda                    #
+  ##########################################################
+  AuthFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+
+      Policies:
+        - PolicyName: CognitoIdpPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-idp:SignUp
+                  - cognito-idp:InitiateAuth
+                  - cognito-idp:ResendConfirmationCode
+                  - cognito-idp:ConfirmSignUp
+                  - cognito-idp:AdminGetUser
+                  - cognito-idp:AdminDeleteUser
+                  - cognito-idp:ForgotPassword
+                  - cognito-idp:ConfirmForgotPassword
+                  - cognito-idp:ChangePassword
+                  - cognito-idp:AssociateSoftwareToken
+                  - cognito-idp:VerifySoftwareToken
+                  - cognito-idp:SetUserMFAPreference
+                  - cognito-idp:RespondToAuthChallenge
+                  - cognito-idp:GetUser
+                  - cognito-idp:AdminUpdateUserAttributes
+                  - cognito-idp:AdminInitiateAuth
+                Resource: !Ref UserPoolArnParam
+
+        - PolicyName: DynamoDBCrudPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/Invitations"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/Invitations/index/*"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/Users"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/Users/index/*"
+
+
+        - PolicyName: SSMReadAllParameters
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParameterHistory
+                  - ssm:GetParametersByPath
+                Resource: "arn:aws:ssm:eu-west-1:*:parameter/*"
+
+        - PolicyName: KMSDecryptPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource:
+                  - !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
+                  - !ImportValue lince-KmsKeyArn
+
+
+  ##########################################################
+  #                     API Gateway                        #
+  ##########################################################
+  AuthApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub 'LinceAuthApi-${Environment}'
+      StageName: !Ref Environment
+      EndpointConfiguration: REGIONAL
+      Cors:
+        AllowOrigin: !Sub
+          - https://app.${Domain}
+          - { Domain: !FindInMap [EnvConfig, !Ref Environment, DomainBase] }
+        AllowMethods: "'OPTIONS,GET,POST,PUT,PATCH,DELETE'"
+        AllowHeaders: "'Content-Type,Authorization,X-Csrf-Token,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,Origin,Accept'"
+        AllowCredentials: true
+      #Auth:
+      #  DefaultAuthorizer: CognitoAuthorizer
+      #  AddDefaultAuthorizerToCorsPreflight: false
+      #  Authorizers:
+      #    CognitoAuthorizer:
+      #      UserPoolArn: arn:aws:cognito-idp:eu-west-1:302263054091:userpool/eu-west-1_W6zT6IwxO
+      #      Identity:
+      #        Header: Authorization
+      MethodSettings:
+        - ResourcePath: /*
+          HttpMethod: "*"
+          ThrottlingBurstLimit: 100
+          ThrottlingRateLimit: 50
+
+  ##########################################################
+  #                 Función principal                      #
+  ##########################################################
+  AuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:                   
+      FunctionName: !Sub 'lince-auth-${Environment}'
+      CodeUri: .
+      Handler: dist/lambdaHandler.handler
+      Runtime: nodejs18.x
+      Timeout: 60
+      MemorySize: 512
+      VpcConfig:
+        SubnetIds: [!Ref PrivateSubnetOne, !Ref PrivateSubnetTwo]
+        SecurityGroupIds: [!Ref LambdaSecurityGroup]
+      Role: !GetAtt AuthFunctionRole.Arn
+      AutoPublishAlias: !Ref Environment
+      ProvisionedConcurrencyConfig:
+        !If
+          - IsLive
+          - ProvisionedConcurrentExecutions: 3 
+          - !Ref 'AWS::NoValue'
+      Events:                      
+        ApiInvoke:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AuthApi
+            Path: /{proxy+}
+            Method: ANY
+      Environment:
+        Variables:
+          USERS_TABLE: !Ref UsersTable
+          REQUIRE_INVITE: !Ref RequireInvite
+
+
+  ##########################################################
+  #              Dominio personalizado                     #
+  ##########################################################
+  AuthDomainName:
+    Type: AWS::ApiGateway::DomainName
+    Properties:
+      DomainName: !Sub
+        - 'auth.${DB}'
+        - { DB: !FindInMap [EnvConfig, !Ref Environment, DomainBase] }
+      RegionalCertificateArn: !ImportValue lince-WildcardCertArn
+      EndpointConfiguration:
+        Types: [REGIONAL]
+
+  AuthBasePathMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    DependsOn:
+      - AuthDomainName
+      - AuthApiStage
+    Properties:
+      DomainName: !Ref AuthDomainName
+      RestApiId: !Ref AuthApi
+      Stage: !Ref Environment
+
+
+############################################################
+#                       Salidas                             #
+############################################################
+Outputs:
+  AuthApiId:
+    Description: "API Gateway ID for el servicio Auth"
+    Value: !Ref AuthApi
+    Export:
+      Name: !Sub "LinceAuth-${Environment}-ApiId"
+
+  AuthUrl:
+    Description: "Endpoint del entorno activo"
+    Value: !Sub
+      - 'https://${ApiId}.execute-api.${AWS::Region}.amazonaws.com/${EnvStage}/'
+      - { ApiId: !Ref AuthApi, EnvStage: !Ref Environment }
+
+  CustomDomainUrl:
+    Description: "URL del dominio personalizado"
+    Value: !Sub
+      - 'https://auth.${DB}'
+      - { DB: !FindInMap [EnvConfig, !Ref Environment, DomainBase] }

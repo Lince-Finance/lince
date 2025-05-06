@@ -1,0 +1,167 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Lince Payments Service
+
+############################################################
+#                     Parámetros                            #
+############################################################
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, live]
+
+  PrivateSubnetOne:
+    Type: String
+  PrivateSubnetTwo:
+    Type: String
+  LambdaSecurityGroup:
+    Type: String
+
+############################################################
+#                Valores que sí cambian                     #
+############################################################
+Mappings:
+  EnvConfig:
+    dev:  { DomainBase: lince.zone }
+    live: { DomainBase: lince.finance }
+
+############################################################
+#                        Globals                            #
+############################################################
+Globals:
+  Function:
+    Runtime:       nodejs18.x
+    Architectures: [arm64]
+    Timeout:       60
+    MemorySize:    512
+    VpcConfig:
+      SubnetIds:        [!Ref PrivateSubnetOne, !Ref PrivateSubnetTwo]
+      SecurityGroupIds: [!Ref LambdaSecurityGroup]
+    Environment:
+      Variables:
+        NODE_ENV:  !Ref Environment
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+
+############################################################
+#                       Recursos                            #
+############################################################
+Resources:
+
+  ##########################################################
+  #     Role / permisos                                    #
+  ##########################################################
+  PaymentsFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: SSMReadPaymentsKeys
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParametersByPath
+                Resource: "arn:aws:ssm:*:*:parameter/lince/*"
+
+        - PolicyName: KMSDecryptPayments
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource:
+                  - !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm'
+                  - !ImportValue lince-KmsKeyArn
+
+  ##########################################################
+  #                     API Gateway                        #
+  ##########################################################
+  PaymentsApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name:      !Sub 'LincePaymentsApi-${Environment}'
+      StageName: !Ref Environment
+      EndpointConfiguration: REGIONAL
+      Cors:
+        AllowMethods:  "'OPTIONS,GET,POST,PUT,PATCH,DELETE'"
+        AllowHeaders:  "'Content-Type,Authorization,X-Csrf-Token,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,Origin,Accept'"
+        AllowOrigin:   !Sub
+          - https://app.${DomainBase}
+          - DomainBase: !FindInMap [EnvConfig, !Ref Environment, DomainBase]
+        AllowCredentials: true
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod:   "*"
+          ThrottlingBurstLimit: 100
+          ThrottlingRateLimit:  50
+
+  ##########################################################
+  #                 Función principal                      #
+  ##########################################################
+  PaymentsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lince-payments-${Environment}'
+      Role:         !GetAtt PaymentsFunctionRole.Arn
+      CodeUri:      .
+      Handler:      dist/lambdaHandler.handler
+      Events:
+        ApiInvoke:
+          Type: Api
+          Properties:
+            RestApiId: !Ref PaymentsApi
+            Path:      /{proxy+}
+            Method:    ANY
+
+  ##########################################################
+  #              Dominio personalizado                     #
+  ##########################################################
+  PaymentsDomainName:
+    Type: AWS::ApiGateway::DomainName
+    Properties:
+      DomainName: !Sub
+        - 'payments.${DomainBase}'
+        - DomainBase: !FindInMap [EnvConfig, !Ref Environment, DomainBase]
+      RegionalCertificateArn: !ImportValue lince-WildcardCertArn
+      EndpointConfiguration:
+        Types: [REGIONAL]
+
+  PaymentsBasePathMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    DependsOn: [PaymentsDomainName, PaymentsApi]
+    Properties:
+      DomainName: !Ref PaymentsDomainName
+      RestApiId:  !Ref PaymentsApi
+      Stage:      !Ref Environment
+
+############################################################
+#                       Salidas                            #
+############################################################
+Outputs:
+  PaymentsApiId:
+    Description: API Gateway ID (payments)
+    Value: !Ref PaymentsApi
+    Export:
+      Name: !Sub 'LincePayments-${Environment}-ApiId'
+
+  PaymentsUrl:
+    Description: Endpoint regional
+    Value: !Sub 'https://${PaymentsApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/'
+    Export:
+      Name: !Sub 'LincePayments-${Environment}-Url'
+
+  PaymentsCustomDomain:
+    Description: URL con dominio personalizado
+    Value: !Sub
+      - 'https://payments.${DomainBase}'
+      - DomainBase: !FindInMap [EnvConfig, !Ref Environment, DomainBase]

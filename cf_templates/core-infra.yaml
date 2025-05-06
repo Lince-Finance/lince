@@ -1,0 +1,1287 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  All-in-one CF template - Cognito, SSM params, IAM policy/role, 
+  3 DynamoDB tables, plus a secure VPC (public & private subnets),
+  NAT Gateways, VPC Endpoints for SSM & DynamoDB.
+
+# BORRAR PRIMERO OTRAS PILAS, LUEGO BUCKET SAM ARTIFACTS CON TODO LO DE DENTRO, DYNAMO TABLES
+# EN CASO DE REDESPLIEGUE DESDE 0, QUE BLOQUEA TODO
+
+Parameters:
+  Env:
+    Type: String
+    AllowedValues: [dev, live]
+    Default: dev
+    Description: “dev = app.lince.zone,  live = app.lince.finance”
+
+  ProjectName:
+    Type: String
+    Default: "lince"
+    Description: "Prefix for naming resources"
+
+  VpcCidr:
+    Type: String
+    Default: "10.0.0.0/16"
+    Description: "CIDR block for the main VPC"
+
+  PublicSubnet1Cidr:
+    Type: String
+    Default: "10.0.0.0/24"
+    Description: "CIDR for Public Subnet 1"
+
+  PublicSubnet2Cidr:
+    Type: String
+    Default: "10.0.1.0/24"
+    Description: "CIDR for Public Subnet 2"
+
+  PrivateSubnet1Cidr:
+    Type: String
+    Default: "10.0.2.0/24"
+    Description: "CIDR for Private Subnet 1 (for Lambdas, etc.)"
+
+  PrivateSubnet2Cidr:
+    Type: String
+    Default: "10.0.3.0/24"
+    Description: "CIDR for Private Subnet 2"
+
+  MultiAzNat:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: "Create a second NAT Gateway (true = live, false = dev)"
+  
+  RedisReplicas:
+    Type: Number
+    Default: 0
+    AllowedValues: [0,1]
+    Description: "Numero de replicas por NodeGroup (1 en live)"
+
+  BudgetLimitNat:
+    Type: Number
+    Default: 50                
+    Description: "USD/mes antes de alertar por NAT"
+
+  S3PrefixListId:
+    Type: String
+    Description: Managed prefix‑list ID for S3
+
+  WildcardCertArnUSEast1:
+    Type: String
+    Description: "ARN del certificado wildcard en us-east-1 para Cognito"
+
+  # ────────── OAuth ──────────
+  GoogleClientId:
+    Type: String
+    NoEcho: true
+    Description: "Google OAuth Client-ID (*.apps.googleusercontent.com)"
+
+  GoogleClientSecret:
+    Type: String
+    NoEcho: true
+    Description: "Google OAuth Client-Secret"
+
+  AppleTeamId:
+    Type: String
+    NoEcho: true
+    Description: "Apple Team ID (10 caracteres)"
+
+  AppleKeyId:
+    Type: String
+    NoEcho: true
+    Description: "Apple Key ID (10 caracteres)"
+
+  AppleClientId:
+    Type: String
+    NoEcho: true
+    Description: "Apple Service ID (com.tu.app)"
+
+  ApplePrivateKeyPem:
+    Type: String
+    NoEcho: true
+    Description: "Contenido del .p8 (una sola línea PEM)"
+  
+  RequireInvite:
+    Type: String
+    AllowedValues: [true, false]
+    Default: true
+
+
+Conditions:
+  CreateNat2:  !Equals [ !Ref MultiAzNat, "true" ]
+  SingleNat:   !Not   [ !Condition CreateNat2 ]
+  HasReplica:  !Equals [ !Ref RedisReplicas, 1 ]
+
+Mappings:
+  DomainMap:
+    dev:
+      Zone:        "lince.zone"
+      FqdnApp:     "app.lince.zone"
+      FqdnOAuth:   "login.lince.zone"
+    live:
+      Zone:        "lince.finance"
+      FqdnApp:     "app.lince.finance"
+      FqdnOAuth:   "login.lince.finance"
+
+Resources:
+# ----------------------------------
+  # 1) VPC & Internet Gateway
+  # ----------------------------------
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-VPC"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-IGW"
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # ----------------------------------
+  # 2) Public Subnets
+  # ----------------------------------
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-PubSubnet1"
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-PubSubnet2"
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-PublicRouteTable"
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # ----------------------------------
+  # 3) NAT Gateways in Public Subnet
+  # ----------------------------------
+  NatEIP1:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    DependsOn: PublicSubnet1RouteTableAssociation
+    Properties:
+      AllocationId: !GetAtt NatEIP1.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-NAT1"
+
+  NatEIP2:
+    Type: AWS::EC2::EIP
+    Condition: CreateNat2
+    Properties:
+      Domain: vpc
+
+  NatGateway2:
+    Type: AWS::EC2::NatGateway
+    Condition: CreateNat2
+    DependsOn: PublicSubnet2RouteTableAssociation
+    Properties:
+      AllocationId: !GetAtt NatEIP2.AllocationId
+      SubnetId:     !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-NAT2"
+
+  # ----------------------------------
+  # 4) Private Subnets
+  # ----------------------------------
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-PrivSubnet1"
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-PrivSubnet2"
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-PrivateRT1"
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-PrivateRT2"
+
+  PrivateRoute1ToNat:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NatGateway1
+
+  PrivateRoute2ToNatSingle:
+    Type: AWS::EC2::Route
+    Condition: SingleNat
+    Properties:
+      RouteTableId:        !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId:        !Ref NatGateway1
+
+  PrivateRoute2ToNatMulti:
+    Type: AWS::EC2::Route
+    Condition: CreateNat2
+    Properties:
+      RouteTableId:        !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId:        !Ref NatGateway2
+
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable1
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable2
+
+  # ----------------------------------
+  # 5) VPC Endpoints (DynamoDB, SSM, etc.)
+  # ----------------------------------
+  VPCEndpointDynamoDB:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.dynamodb"
+      VpcId: !Ref VPC
+      RouteTableIds:
+        - !Ref PrivateRouteTable1
+        - !Ref PrivateRouteTable2
+      VpcEndpointType: Gateway
+
+  VPCEndpointSSM:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssm"
+      VpcEndpointType: Interface
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref EndpointSG
+      VpcId: !Ref VPC
+      PrivateDnsEnabled: true
+
+  VPCEndpointSSMMessages:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssmmessages"
+      VpcEndpointType: Interface
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref EndpointSG
+      VpcId: !Ref VPC
+      PrivateDnsEnabled: true
+
+  VPCEndpointEC2Messages:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ec2messages"
+      VpcEndpointType: Interface
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref EndpointSG
+      VpcId: !Ref VPC
+      PrivateDnsEnabled: true
+
+  VPCDefaultSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${ProjectName} - default SG for VPC endpoints"
+      VpcId: !Ref VPC
+      SecurityGroupIngress: []
+      SecurityGroupEgress: []
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-DefaultSG"
+  
+  EndpointSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${ProjectName} - SG for Interface Endpoints"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: tcp          # solo TLS out
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-EndpointSG"
+
+
+  VPCEndpointS3:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcEndpointType: Gateway
+      VpcId: !Ref VPC
+      RouteTableIds:
+        - !Ref PrivateRouteTable1
+        - !Ref PrivateRouteTable2
+
+  VPCEndpointSecretsManager:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.secretsmanager"
+      VpcEndpointType: Interface
+      VpcId: !Ref VPC
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref EndpointSG
+      PrivateDnsEnabled: true
+
+  # ----------------------------------
+  # 7) Cognito, SSM params, IAM policy/role, DynamoDB
+  # ----------------------------------
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      UserPoolName: !Sub "${ProjectName}-UserPool"
+      AutoVerifiedAttributes:
+        - email
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: name
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+      MfaConfiguration: OPTIONAL
+      EnabledMfas:
+        - SOFTWARE_TOKEN_MFA
+      LambdaConfig:
+        PostConfirmation: !GetAtt PostConfirmationFn.Arn
+
+  # ────────────────── 2) IdP Google ──────────────────
+  GoogleIdentityProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    Properties:
+      UserPoolId:   !Ref UserPool
+      ProviderName: Google
+      ProviderType: Google
+      ProviderDetails:
+        client_id:        !Ref GoogleClientId
+        client_secret:    !Ref GoogleClientSecret
+        authorize_scopes: "openid email profile"
+      AttributeMapping:
+        email: "email"
+        name:  "name"
+
+  # ────────────────── 3) IdP Apple ──────────────────
+  AppleIdentityProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    Properties:
+      UserPoolId:   !Ref UserPool
+      ProviderName: SignInWithApple
+      ProviderType: SignInWithApple
+      ProviderDetails:
+        client_id:        !Ref AppleClientId
+        team_id:          !Ref AppleTeamId
+        key_id:           !Ref AppleKeyId
+        private_key:      !Ref ApplePrivateKeyPem
+        authorize_scopes: "name email"
+      AttributeMapping:
+        email: "email"
+        name:  "name"
+
+  # ────────────────── 4) App Client (único) ──────────────────
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn:
+      - GoogleIdentityProvider
+      - AppleIdentityProvider
+      - UserPool
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: !Sub "${ProjectName}-AppClient"
+      GenerateSecret: false
+      # -------- auth tradicional ----------
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+      # -------- Hosted UI / OAuth ----------
+      SupportedIdentityProviders:
+        - COGNITO
+        - Google
+        - SignInWithApple
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: [code]
+      AllowedOAuthScopes: [openid, email, profile]
+      CallbackURLs:
+        - !Sub
+            - "https://${App}/auth/google/callback"
+            - { App: !FindInMap [DomainMap, !Ref Env, FqdnApp] }
+        - !Sub
+            - "https://${App}/auth/apple/callback"
+            - { App: !FindInMap [DomainMap, !Ref Env, FqdnApp] }
+      LogoutURLs:
+        - !Sub
+            - "https://${App}"
+            - { App: !FindInMap [DomainMap, !Ref Env, FqdnApp] }
+
+
+  # ── Dominio para Hosted-UI ──
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !FindInMap [DomainMap, !Ref Env, FqdnOAuth]   # login.lince.zone
+      UserPoolId: !Ref UserPool
+      CustomDomainConfig:
+        CertificateArn: !Ref WildcardCertArnUSEast1
+
+
+  AppRegionParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/lince/AWS_REGION"
+      Type: String
+      Value: !Ref "AWS::Region"
+
+  AppUserPoolIdParam:
+    Type: AWS::SSM::Parameter
+    DependsOn: UserPool
+    Properties:
+      Name: "/lince/AWS_USER_POOL_ID"
+      Type: String
+      Value: !Ref UserPool
+
+  AppClientIdParam:
+    Type: AWS::SSM::Parameter
+    DependsOn: UserPoolClient
+    Properties:
+      Name: "/lince/AWS_CLIENT_ID"
+      Type: String
+      Value: !Ref UserPoolClient
+
+  AppClientSecretParam:
+    Type: AWS::SSM::Parameter
+    DependsOn: UserPoolClient
+    Properties:
+      Name: "/lince/AWS_CLIENT_SECRET"
+      Type: String
+      Value: !GetAtt UserPoolClient.ClientSecret
+
+
+  PaymentsOnramperApiKeyParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/lince/PAYMENTS_ONRAMPER_API_KEY"
+      Type: String
+      Value: "CHANGEME"
+
+  PaymentsOnramperSecretParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/lince/PAYMENTS_ONRAMPER_SECRET_KEY"
+      Type: String
+      Value: "CHANGEME"
+
+  PaymentsOnramperWidgetUrlParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/lince/PAYMENTS_ONRAMPER_WIDGET_URL"
+      Type: String
+      Value: "CHANGEME"
+
+  FrontendUrlParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/lince/FRONTEND_URL"
+      Type: String
+      Value: !FindInMap [DomainMap, !Ref Env, FqdnApp]
+
+  RedirectUriParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/lince/REDIRECT_URI"
+      Type: String
+      Value: !Sub
+        - "https://${App}/auth/google/callback"
+        - { App: !FindInMap [DomainMap, !Ref Env, FqdnApp] }
+
+  GoogleClientIdParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:  "/lince/GOOGLE_CLIENT_ID"
+      Type:  String
+      Value: !Ref GoogleClientId
+
+  GoogleClientSecretParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:  "/lince/GOOGLE_CLIENT_SECRET"
+      Type:  String
+      Value: !Ref GoogleClientSecret
+
+  AppleTeamIdParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/lince/APPLE_TEAM_ID"
+      Type: String
+      Value: !Ref AppleTeamId
+
+  AppleKeyIdParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/lince/APPLE_KEY_ID"
+      Type: String
+      Value: !Ref AppleKeyId
+
+  AppleClientIdParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/lince/APPLE_CLIENT_ID"
+      Type: String
+      Value: !Ref AppleClientId
+
+  ApplePrivateKeyPemParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/lince/APPLE_PRIVATE_KEY_PEM"
+      Type: String
+      Value: !Ref ApplePrivateKeyPem
+
+
+  CognitoDomainParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/lince/COGNITO_DOMAIN"
+      Type: String
+      Value: !FindInMap [DomainMap, !Ref Env, FqdnOAuth]
+
+
+  CognitoAndSsmPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${ProjectName}-CognitoAndSsmPolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - cognito-idp:AdminGetUser
+              - cognito-idp:AdminDeleteUser
+              - cognito-idp:AdminUpdateUserAttributes
+              - cognito-idp:AdminCreateUser
+              - cognito-idp:ListUsers
+              - cognito-idp:AssociateSoftwareToken
+              - cognito-idp:VerifySoftwareToken
+              - cognito-idp:SetUserMFAPreference
+              - cognito-idp:ChangePassword
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - ssm:GetParameter
+              - ssm:GetParameters
+              - ssm:GetParametersByPath
+            Resource: "arn:aws:ssm:*:*:parameter/lince/*"
+          - Effect: Allow
+            Action:
+              - kms:Decrypt
+            Resource:
+            - "arn:aws:kms:*:*:alias/aws/ssm"
+            #- !GetAtt LinceKmsKey.Arn
+
+  BackendRole:
+    Type: AWS::IAM::Role
+    DependsOn: CognitoAndSsmPolicy
+    Properties:
+      RoleName: !Sub "${ProjectName}-BackendRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref CognitoAndSsmPolicy
+
+  # DynamoDB Tables
+  TransactionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: "Transactions"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: "transactionId"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "transactionId"
+          KeyType: "HASH"
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref LinceKmsKey
+
+  InvitationsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: "Invitations"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: "creatorUserId"
+          AttributeType: "S"
+        - AttributeName: "inviteCode"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "creatorUserId"
+          KeyType: "HASH"
+        - AttributeName: "inviteCode"
+          KeyType: "RANGE"
+      GlobalSecondaryIndexes:
+        - IndexName: "ByInviteCodeIndex"
+          KeySchema:
+            - AttributeName: "inviteCode"
+              KeyType: "HASH"
+          Projection:
+            ProjectionType: "ALL"
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref LinceKmsKey
+
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: Users
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: email
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: ByEmail
+          KeySchema:
+            - AttributeName: email
+              KeyType: HASH
+          Projection: { ProjectionType: ALL }
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref LinceKmsKey
+
+  # -----------------------------------------------------------------
+  #  Lambda Post-Confirmation
+  # -----------------------------------------------------------------
+  PostConfirmationFn:
+    Type: AWS::Serverless::Function
+    DependsOn: UsersTable
+    Properties:
+      Runtime: nodejs18.x
+      Handler: index.handler
+      InlineCode: |
+        const { DynamoDBClient, PutItemCommand } =
+              require('@aws-sdk/client-dynamodb');
+        const ddb = new DynamoDBClient({});
+
+        exports.handler = async (event) => {
+          const attr   = event.request.userAttributes;   // sub, email, name…
+          const invite =
+            (event.request.clientMetadata?.inviteCode || '').toUpperCase().trim();
+          const now    = new Date().toISOString();
+
+          try {
+            await ddb.send(new PutItemCommand({
+              TableName: process.env.USERS_TABLE,
+              Item: {
+                userId     : { S: attr.sub },
+                email      : { S: attr.email },
+                displayName: { S: attr.name || '' },
+                inviteCode : { S: invite },
+                createdAt  : { S: now },
+                confirmedAt: { S: now },
+                mfaEnabled : { BOOL: false },
+              },
+              /* idempotente: sólo si aún no existe */
+              ConditionExpression: 'attribute_not_exists(userId)',
+            }));
+
+          /*  Consistencia ▸ si ya existe (re-intento) lo ignoramos.
+              Otros errores se registran y se propagan para que la
+              invocación quede marcada como fallo en CloudWatch.  */
+          } catch (err) {
+            if (err.name !== 'ConditionalCheckFailedException') {
+              console.error('[PostConfirmation]', err);
+              throw err;
+            }
+          }
+          
+          return event;
+        };
+      Environment:
+        Variables:
+          USERS_TABLE:    !Ref UsersTable
+          REQUIRE_INVITE: !Ref RequireInvite
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:GenerateDataKey*
+              Resource: !GetAtt LinceKmsKey.Arn
+
+
+          
+  PostConfirmationInvokePerm:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PostConfirmationFn
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt UserPool.Arn
+
+  #Lambda SG
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${ProjectName} - SG for Lambdas"
+      VpcId: !Ref VPC
+      SecurityGroupIngress: []
+      SecurityGroupEgress:
+        # HTTPS a S3 (prefix list)
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort:   443
+          DestinationPrefixListId: !Ref S3PrefixListId
+        # Redis
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort:   6379
+          DestinationSecurityGroupId: !GetAtt RedisSecurityGroup.GroupId
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort:   443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-LambdaSG"
+
+  # regla aparte para Interface Endpoints
+  LambdaToEndpointEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref LambdaSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort:   443
+      DestinationSecurityGroupId: !Ref EndpointSG
+
+  # ----------------------------
+  # 8) ElastiCache for Redis
+  # ----------------------------
+
+  RedisSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: !Sub "${ProjectName}-Redis SubnetGroup"
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      CacheSubnetGroupName: !Sub "${ProjectName}-redis-subnetgroup"
+
+  # --- Redis SG (sin regla entrante) -----------------
+  RedisSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${ProjectName} - Redis SG"
+      VpcId: !Ref VPC
+      SecurityGroupIngress: []
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-RedisSG"
+
+  # Regla Lambda
+  RedisIngressFromLambda:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref RedisSecurityGroup
+      IpProtocol: tcp
+      FromPort: 6379
+      ToPort:   6379
+      SourceSecurityGroupId: !Ref LambdaSecurityGroup
+
+
+  #MyRedisCluster:
+  #  Type: AWS::ElastiCache::CacheCluster
+  #  DependsOn: RedisSubnetGroup
+  #  Properties:
+  #    Engine: "redis"
+  #    EngineVersion: "6.2"
+  #    CacheNodeType: "cache.t3.micro"
+  #    NumCacheNodes: 1
+  #    ClusterName: !Sub "${ProjectName}-redis-cluster"
+  #    CacheSubnetGroupName: !Ref RedisSubnetGroup
+  #    ReplicasPerNodeGroup: !Ref RedisReplicas
+  #    VpcSecurityGroupIds:
+  #      - !GetAtt RedisSecurityGroup.GroupId
+  #    AutoMinorVersionUpgrade: true
+  #    PreferredMaintenanceWindow: "sun:05:00-sun:06:00"  # Ventana de mantenimiento
+  #    Tags:
+  #      - Key: Name
+  #        Value: !Sub "${ProjectName}-redis-cluster"
+
+  MyRedisGroup:
+    Type: AWS::ElastiCache::ReplicationGroup
+    Properties:
+      ReplicationGroupId: !Sub "${ProjectName}-redis"
+      ReplicationGroupDescription: !Sub "${ProjectName} Redis"
+      Engine: redis
+      EngineVersion: "6.2"
+      CacheNodeType: cache.t3.micro
+      NumNodeGroups: 1
+      ReplicasPerNodeGroup: !Ref RedisReplicas   # 0 en dev, 1 en live
+      CacheSubnetGroupName: !Ref RedisSubnetGroup
+      SecurityGroupIds:
+        - !GetAtt RedisSecurityGroup.GroupId
+      AutomaticFailoverEnabled: !If [HasReplica, true, false]
+      TransitEncryptionEnabled: true
+      AutoMinorVersionUpgrade: true
+      PreferredMaintenanceWindow: "sun:05:00-sun:06:00"
+
+
+  RedisUrlParam:
+    Type: AWS::SSM::Parameter
+    DependsOn: MyRedisGroup
+    Properties:
+      Name: "/lince/REDIS_URL"
+      Type: String
+      Value: !Sub >
+        redis://${MyRedisGroup.PrimaryEndPoint.Address}:${MyRedisGroup.PrimaryEndPoint.Port}
+
+  MyFlowLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/${ProjectName}/vpcFlowLogs"
+      RetentionInDays: 14
+
+  VPCFlowLogsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: vpc-flow-logs.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      ManagedPolicyArns:
+        # O un policy inline con logs:CreateLogStream, logs:PutLogEvents
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+
+  VPCFlowLog:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      ResourceType: VPC
+      ResourceId: !Ref VPC
+      TrafficType: REJECT
+      MaxAggregationInterval: 600
+      LogGroupName: !Ref MyFlowLogGroup
+      DeliverLogsPermissionArn: !GetAtt VPCFlowLogsRole.Arn
+
+  LinceWildcardCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName:
+        Fn::Sub:
+          - "*.${Suffix}"
+          - Suffix: !FindInMap [DomainMap, !Ref Env, Zone]
+      ValidationMethod: DNS
+      SubjectAlternativeNames:
+        - Fn::FindInMap: [DomainMap, !Ref Env, Zone]
+
+        
+  LinceKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      EnableKeyRotation: true
+      PendingWindowInDays: 7
+      Description: !Sub "${ProjectName} CMK for secrets & data at rest"
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          # 1) root de la cuenta
+          - Sid: RootAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+
+          # 2) Lambda backend
+          - Sid: LambdaDecrypt
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt BackendRole.Arn
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey*
+            Resource: "*"
+
+          # 3) (opcional) AWS Config
+          #- Sid: AWSConfigEncrypt
+          #  Effect: Allow
+          #  Principal:
+          #    Service: config.amazonaws.com
+          #  Action:
+          #    - kms:Encrypt
+          #    - kms:GenerateDataKey*
+          #  Resource: "*"
+          
+          # 4) S3 puede cifrar objetos en el bucket de artefactos
+          - Sid: S3EncryptArtifacts
+            Effect: Allow
+            Principal: { Service: s3.amazonaws.com }
+            Action:
+              - kms:Encrypt
+              - kms:GenerateDataKey*
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:SourceArn: !Sub |
+                  arn:aws:s3:::${ProjectName}-sam-artifacts-${AWS::AccountId}-${AWS::Region}
+
+  LinceKmsAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/lince-app
+      TargetKeyId: !Ref LinceKmsKey
+
+  # ──────────────────────────────────────────────────────────
+  # NEW - Interface VPC Endpoint for AWS KMS
+  # ──────────────────────────────────────────────────────────
+  VPCEndpointKMS:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.kms"   # standard (non-FIPS) endpoint :contentReference[oaicite:0]{index=0}
+      VpcEndpointType: Interface
+      VpcId: !Ref VPC
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2          # 2 AZs → HA
+      SecurityGroupIds:
+        - !Ref EndpointSG              # ya permite TCP 443 desde Lambda
+      PrivateDnsEnabled: true          # “kms.region.amazonaws.com” → IP privada
+
+
+  # S3 para SAM      
+  SamArtifactsBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: LinceKmsKey
+    Properties:
+      BucketName: !Sub "${ProjectName}-${Env}-sam-artifacts-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref LinceKmsKey
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-SamArtifactsBucket"
+
+
+  SamArtifactsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SamArtifactsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # --- escribir los ficheros de AWS Config ---
+          - Sid: AllowPut
+            Effect: Allow
+            Principal: { Service: config.amazonaws.com }
+            Action: s3:PutObject
+            Resource: !Sub "arn:aws:s3:::${SamArtifactsBucket}/AWSLogs/${AWS::AccountId}/*"
+
+          # --- leer el ACL del bucket (requisito de Config) ---
+          - Sid: AllowGetAcl
+            Effect: Allow
+            Principal: { Service: config.amazonaws.com }
+            Action: s3:GetBucketAcl
+            Resource: !Sub "arn:aws:s3:::${SamArtifactsBucket}"
+          # 1) Permisos GetBucketAcl
+          - Sid: AWSConfigBucketPermissionsCheck
+            Effect: Allow
+            Principal: { Service: config.amazonaws.com }
+            Action: s3:GetBucketAcl
+            Resource: !Sub "arn:aws:s3:::${SamArtifactsBucket}"
+            Condition:
+              StringEquals:
+                AWS:SourceAccount: !Sub "${AWS::AccountId}"
+
+          # 2) Permisos ListBucket
+          - Sid: AWSConfigBucketExistenceCheck
+            Effect: Allow
+            Principal: { Service: config.amazonaws.com }
+            Action: s3:ListBucket
+            Resource: !Sub "arn:aws:s3:::${SamArtifactsBucket}"
+            Condition:
+              StringEquals:
+                AWS:SourceAccount: !Sub "${AWS::AccountId}"
+
+          # 3) Permisos PutObject  (añade condición del ACL)
+          - Sid: AWSConfigBucketDelivery
+            Effect: Allow
+            Principal: { Service: config.amazonaws.com }
+            Action: s3:PutObject
+            Resource: !Sub "arn:aws:s3:::${SamArtifactsBucket}/AWSLogs/${AWS::AccountId}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceAccount: !Sub "${AWS::AccountId}"
+                s3:x-amz-acl: bucket-owner-full-control
+          - Sid: AllowCFNPut
+            Effect: Allow
+            Principal: { Service: cloudformation.amazonaws.com }
+            Action: s3:PutObject
+            Resource: !Sub "arn:aws:s3:::${SamArtifactsBucket}/*"
+
+
+  # --- Budgets ---
+  NatBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName:  NAT-DataProcessing
+        BudgetType:  COST
+        TimeUnit:    MONTHLY
+        CostFilters:
+          Service: ["Amazon Elastic Compute Cloud - NatGateway"]
+        BudgetLimit:
+          Amount: !Ref BudgetLimitNat
+          Unit:   USD
+        CostTypes:
+          IncludeCredit:  false
+          IncludeRefund:  false
+
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType:   ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold:          80
+            ThresholdType:      PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: lincefinance@gmail.com
+
+
+Outputs:
+  VpcId:
+    Description: "ID of the newly created VPC"
+    Value: !Ref VPC
+
+  PublicSubnet1Id:
+    Description: "Public Subnet 1 ID"
+    Value: !Ref PublicSubnet1
+
+  PublicSubnet2Id:
+    Description: "Public Subnet 2 ID"
+    Value: !Ref PublicSubnet2
+
+  PrivateSubnet1Id:
+    Description: "Private Subnet 1 ID"
+    Value: !Ref PrivateSubnet1
+
+  PrivateSubnet2Id:
+    Description: "Private Subnet 2 ID"
+    Value: !Ref PrivateSubnet2
+
+  NatGateway1Id:
+    Description: "NAT Gateway 1"
+    Value: !Ref NatGateway1
+
+  UserPoolId:
+    Description: "Cognito User Pool ID"
+    Value: !Ref UserPool
+
+  UserPoolClientId:
+    Description: "App Client ID"
+    Value: !Ref UserPoolClient
+
+  UserPoolClientSecret:
+    Description: "App Client Secret"
+    Value: !GetAtt UserPoolClient.ClientSecret
+
+  TransactionsTableName:
+    Description: "Transactions table name"
+    Value: !Ref TransactionsTable
+
+  InvitationsTableName:
+    Description: "Invitations table name"
+    Value: !Ref InvitationsTable
+
+  RedisEndpointAddress:
+    Value: !GetAtt MyRedisGroup.PrimaryEndPoint.Address
+  
+  RedisEndpointPort:
+    Value: !GetAtt MyRedisGroup.PrimaryEndPoint.Port
+
+  LambdaSecurityGroupId:
+    Description: "SG for Lambdas in Lince"
+    Value: !Ref LambdaSecurityGroup
+    Export:
+      Name: !Sub "${ProjectName}-LambdaSGId"
+  
+  SamArtifactsBucketName:
+    Description: "S3 bucket for SAM build artifacts"
+    Value: !Ref SamArtifactsBucket
+    Export:
+      Name: !Sub "${ProjectName}-SamArtifactsBucketName"
+
+  LinceWildcardCertArn:
+    Description: ARN for wildcard certificate
+    Value: !Ref LinceWildcardCertificate
+    Export:
+      Name: !Sub "${ProjectName}-WildcardCertArn"
+
+  NatGateway2Id:
+    Condition: CreateNat2
+    Description: "NAT Gateway 2 (solo live)"
+    Value: !Ref NatGateway2
+
+  LinceKmsKeyArn:
+    Description: "ARN of CMK for Lince"
+    Value: !GetAtt LinceKmsKey.Arn
+    Export:
+      Name: !Sub "${ProjectName}-KmsKeyArn"
+
+  RedisReplicasUsed:
+    Description: "Replicas configuradas en Redis"
+    Value: !Ref RedisReplicas
+
+  GoogleClientSecretSsmArn:
+    Description: "Arn del parámetro SSM con el secret de Google"
+    Value: !Ref GoogleClientSecretParam
+    Export:
+      Name: !Sub "lince-${Env}-GoogleClientSecret"

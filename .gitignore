@@ -1,0 +1,44 @@
+# Carpetas y archivos generados por Visual Studio
+.vs/
+*.user
+*.suo
+
+# Build results
+[Bb]in/
+[Oo]bj/
+Debug/
+Release/
+
+# Archivos de configuraci�n temporal
+*.temp
+*.log
+*.obj
+*.pch
+*.pdb
+*.cache
+
+# Paquetes de NuGet (si corresponde)
+packages/
+
+# Paquetes externos descargados a la carpeta local
+*.nupkg
+*.snupkg
+
+# Opcional: Archivos de configuraci�n locales (ejemplo para ASP.NET)
+appsettings.*.local.json
+
+# Resharper/ Rider
+*.DotSettings.user
+_ReSharper*
+*.[Rr]ider/
+
+# Archivos del sistema operativo (por precauci�n)
+Thumbs.db
+*.DS_Store
+
+# Carpetas de build/compilaci�n para proyectos JavaScript/TypeScript
+node_modules/
+dist/
+.next
+*/.aws-sam/
+*/out/
