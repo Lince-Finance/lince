@@ -3,8 +3,9 @@
 import Icon from "@/assets/lince-icon.svg";
 
 import LoginFormHeading from "@/components/login/login-form-heading";
+import CustomContainer from "@/components/reusable/CustomContainer";
 import { emailLoginBtnStyles } from "@/styles/reusable-styles";
-import { Box, Button, Image, Input, VStack } from "@chakra-ui/react";
+import { Box, Button, Image, Input } from "@chakra-ui/react";
 import { faEye, faEyeSlash } from "@fortawesome/free-regular-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import Link from "next/link";
@@ -16,14 +17,7 @@ const LoginPassword = () => {
   const [showPassword, setShowPassword] = useState<boolean>(false);
 
   return (
-    <VStack
-      alignItems={"start"}
-      justifyContent={"space-between"}
-      bg={"black"}
-      minH={"100dvh"}
-      px={"2xl"}
-      py={5}
-    >
+    <CustomContainer>
       {/* Top Part */}
       <Box w={"100%"}>
         {/* Icon */}
@@ -87,7 +81,7 @@ const LoginPassword = () => {
           Continue
         </Button>
       </Link>
-    </VStack>
+    </CustomContainer>
   );
 };
 

@@ -3,12 +3,14 @@
 import { PinInput } from "@chakra-ui/react";
 import { Dispatch, SetStateAction } from "react";
 
-const OTPBox = ({
+const ExclusiveAccessCode = ({
   value,
   setValue,
+  invalid,
 }: {
   value: string[];
   setValue: Dispatch<SetStateAction<string[]>>;
+  invalid?: boolean;
 }) => {
   // Styles
   const reusableStyles = {
@@ -17,10 +19,8 @@ const OTPBox = ({
     p: "s",
     color: "grayCliff.solid.100",
     borderWidth: "2px",
-    borderRadius: "none",
-    borderLeft: "none",
-    borderY: "none",
-    borderColor: "grayCliff.solid.800",
+    borderRadius: "l2",
+    borderColor: invalid ? "redInx.solid.800" : "grayCliff.solid.800",
     _placeholder: {
       color: "grayCliff.solid.400",
       fontSize: "20px",
@@ -33,10 +33,8 @@ const OTPBox = ({
     p: "s",
     color: "grayCliff.solid.100",
     borderWidth: "2px",
-    borderRadius: "none",
-    borderX: "none",
-    borderY: "none",
-    borderColor: "grayCliff.solid.800",
+    borderRadius: "l2",
+    borderColor: invalid ? "redInx.solid.800" : "grayCliff.solid.800",
     _placeholder: {
       color: "grayCliff.solid.400",
       fontSize: "20px",
@@ -47,9 +45,8 @@ const OTPBox = ({
     <PinInput.Root value={value} onValueChange={(e) => setValue(e.value)}>
       <PinInput.HiddenInput />
       <PinInput.Control
-        gap={"0px"}
-        border={"2px solid"}
-        borderColor={"grayCliff.solid.800"}
+        gap={"4xs"}
+        boxShadow={invalid ? "0 0 0 1px redInx.solid.800" : "none"}
         rounded={"l2"}
         className="otp-box"
       >
@@ -62,9 +59,8 @@ const OTPBox = ({
         <PinInput.Input index={1} {...reusableStyles} />
         <PinInput.Input index={2} {...reusableStyles} />
         <PinInput.Input index={3} {...reusableStyles} />
-        <PinInput.Input index={4} {...reusableStyles} />
         <PinInput.Input
-          index={5}
+          index={4}
           {...lastOtpBoxInput}
           roundedTopRight={"l2"}
           roundedBottomRight={"l2"}
@@ -74,4 +70,4 @@ const OTPBox = ({
   );
 };
 
-export default OTPBox;
+export default ExclusiveAccessCode;

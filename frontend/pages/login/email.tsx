@@ -3,6 +3,7 @@
 import Icon from "@/assets/lince-icon.svg";
 
 import LoginFormHeading from "@/components/login/login-form-heading";
+import CustomContainer from "@/components/reusable/CustomContainer";
 import { emailLoginBtnStyles } from "@/styles/reusable-styles";
 import { Box, Button, Image, Input, VStack } from "@chakra-ui/react";
 import Link from "next/link";
@@ -12,14 +13,7 @@ const WithEmail = () => {
   const [emailValue, setEmailValue] = useState<string>("");
 
   return (
-    <VStack
-      alignItems={"start"}
-      justifyContent={"space-between"}
-      bg={"black"}
-      minH={"100dvh"}
-      px={"2xl"}
-      py={5}
-    >
+    <CustomContainer>
       {/* Top Part */}
       <Box w={"100%"}>
         {/* Icon */}
@@ -67,7 +61,7 @@ const WithEmail = () => {
           Continue
         </Button>
       </Link>
-    </VStack>
+    </CustomContainer>
   );
 };
 
