@@ -15,3 +15,9 @@ export const loginCarouselData = [
     desc: "Anytime. No lockups. Your \n money, your rules.​​​​​​​​​​​​​​​​",
   },
 ];
+
+export const goalsData = [
+  { label: "I want to protect my money", value: "1" },
+  { label: "I want to grow my money while I protect it", value: "2" },
+  { label: "I want to grow my money as much as possible", value: "3" },
+];

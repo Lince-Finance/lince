@@ -33,3 +33,15 @@ button {
 .otp-box input:is(:focus-visible, [data-focus-visible]) {
   outline-color: #928346 !important;
 }
+
+.radio-indicator {
+  background: transparent !important;
+  border-color: #59502a !important;
+  color: #888471 !important;
+}
+
+.radio-indicator[data-checked] {
+  background: transparent !important;
+  border-color: #59502a !important;
+  color: #888471 !important;
+}
