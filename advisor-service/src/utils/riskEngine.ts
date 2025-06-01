@@ -8,11 +8,21 @@ export const riskScoreFor = (step: StepId, optionId: string): number => {
 
 export const totalRisk = (answers: Partial<Answers>): number => {
   const entries = Object.entries(answers) as [StepId, string][];
+  console.log('[DEBUG] totalRisk entries:', entries);
+  
   const sum = entries.reduce(
-    (acc, [step, opt]) => acc + riskScoreFor(step, opt),
+    (acc, [step, opt]) => {
+      const risk = riskScoreFor(step, opt);
+      console.log(`[DEBUG] ${step}:${opt} → risk:${risk}, running total: ${acc + risk}`);
+      return acc + risk;
+    },
     0,
   );
-  return entries.length ? +(sum / entries.length).toFixed(2) : 0;
+  
+  const average = entries.length ? +(sum / entries.length).toFixed(2) : 0;
+  console.log(`[DEBUG] Final calculation: ${sum} / ${entries.length} = ${average}`);
+  
+  return average;
 };
 
 export type RiskProfile = 'CONSERVATIVE' | 'MODERATE' | 'AGGRESSIVE';

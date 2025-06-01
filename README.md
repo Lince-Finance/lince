@@ -1,7 +1,2 @@
-# Lince Finance
-
-> **Automated Crypto Investments for Smarter Growth**
-
-## Live Demo
-
-[app.lince.zone](https://app.lince.zone)
+En este proyecto esa URL de Redis (redis y no rediss) sí va cifrada porque el
+helper activa TLS automáticamente. Otra opción es ssm param con rediss -> explorar en el futuro.

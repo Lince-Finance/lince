@@ -47,13 +47,11 @@ export default function StrategyPopup({
     }
 
     try {
-      // Update risk profile in database
       const response = await csrfFetch('/api/user/risk-profile', {
         method: 'POST',
-        body: JSON.stringify({ riskProfile: profile }),
+        body: JSON.stringify({ riskProfile: profile, riskScore: score }),
       });
 
-      // Update local state
       setRiskProfile(score, profile);
       setState(false);
     } catch (error) {

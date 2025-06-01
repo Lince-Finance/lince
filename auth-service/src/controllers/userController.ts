@@ -48,8 +48,8 @@ export class UserController {
             }
             const userId = userClaims.sub;
 
-            const { displayName, riskProfile } = req.body;
-            const updatedProfile = await UserService.updateUserProfile(userId, { displayName, riskProfile });
+            const { displayName, riskProfile, riskScore } = req.body;
+            const updatedProfile = await UserService.updateUserProfile(userId, { displayName, riskProfile, riskScore });
 
             return res.json({ profile: updatedProfile });
         } catch (error: any) {

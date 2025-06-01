@@ -135,7 +135,7 @@ function MfaAssociatePage() {
               target="_blank"
               textDecoration="underline"
             >
-              Abrir en la app Authenticator
+              Open in Authenticator
             </Link>
 
             <Button

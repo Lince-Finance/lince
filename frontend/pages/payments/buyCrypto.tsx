@@ -1,3 +1,5 @@
+// Currently integrating payment via crypto transactions.
+
 import React from 'react';
 import UserLayout from '../../components/UserLayout';
 import { withUserSSR } from '../../lib/withUserSSR';
@@ -12,6 +14,9 @@ function BuyCryptoPage({ onramperUrl = '' }: BuyCryptoPageProps) {
 
   return (
     <UserLayout>
+      <p style={{ fontWeight: 'bold', color: 'grayCliff.solid.100', marginBottom: '20px' }}>
+        Currently integrating payment via crypto transactions.
+      </p>
       <h1>Buy Crypto with Onramper</h1>
 
       {onramperUrl && new URL(onramperUrl).protocol === 'https:' ? (

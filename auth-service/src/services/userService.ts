@@ -19,6 +19,7 @@ function createCognitoClient() {
 interface UpdateProfileInput {
     displayName?: string;
     riskProfile?: 'CONSERVATIVE' | 'MODERATE' | 'AGGRESSIVE';
+    riskScore?: string;
 }
 
 export class UserService {
@@ -50,6 +51,7 @@ export class UserService {
         const updates: Record<string, any> = {};
         if (data.displayName) updates.displayName = data.displayName;
         if (data.riskProfile) updates.riskProfile = data.riskProfile;
+        if (data.riskScore) updates.riskScore = data.riskScore;
         
         if (Object.keys(updates).length > 0) {
             await updateUser(userId, updates);

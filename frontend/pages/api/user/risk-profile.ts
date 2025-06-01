@@ -24,12 +24,17 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
   } else if (req.method === 'POST') {
     try {
-      const { riskProfile } = req.body;
+      const { riskProfile, riskScore } = req.body;
       if (!riskProfile) {
         return res.status(400).json({ error: 'Risk profile is required' });
       }
 
-      console.log('[risk-profile] POST request:', { riskProfile });
+      console.log('[risk-profile] POST request:', { riskProfile, riskScore });
+
+      const updateData: any = { riskProfile };
+      if (riskScore !== undefined) {
+        updateData.riskScore = String(riskScore);
+      }
 
       const response = await fetch(`${process.env.NEXT_PUBLIC_AUTH_BASE_URL}/user/profile`, {
         method: 'PATCH',
@@ -37,7 +42,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
           'Content-Type': 'application/json',
           'Cookie': req.headers.cookie || '',
         },
-        body: JSON.stringify({ riskProfile }),
+        body: JSON.stringify(updateData),
       });
 
       if (!response.ok) {

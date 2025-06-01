@@ -10,8 +10,9 @@ import {
   Button,
   Flex,
   Menu,
-  SkeletonCircle,
   Portal,
+  Circle,
+  Text,
 } from "@chakra-ui/react";
 import Head from "next/head";
 
@@ -42,6 +43,10 @@ export default function UserLayout({
     router.push("/auth");
   }
 
+  const getEmailInitial = () => {
+    return user?.email ? user.email.charAt(0).toUpperCase() : "U";
+  };
+
   return (
     <>
       <Head>
@@ -69,7 +74,21 @@ export default function UserLayout({
           <Menu.Root>
             <Menu.Trigger asChild>
               <Box as={"button"}>
-                <SkeletonCircle w={10} h={10} rounded={"100%"} />
+                <Circle
+                  size="40px"
+                  bg="white !important"
+                  color="black !important"
+                  fontWeight="bold"
+                  fontSize="lg"
+                  cursor="pointer"
+                  _hover={{ bg: "gray.100 !important" }}
+                  transition="background-color 0.2s"
+                  border="1px solid"
+                  borderColor="gray.300"
+                  boxShadow="0 1px 3px rgba(0, 0, 0, 0.1)"
+                >
+                  <Text>{getEmailInitial()}</Text>
+                </Circle>
               </Box>
             </Menu.Trigger>
             <Portal>
