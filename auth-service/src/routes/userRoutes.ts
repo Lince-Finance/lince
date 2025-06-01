@@ -1,36 +1,23 @@
-
 import { Router } from 'express';
-import csrf from 'csurf';
 import { UserController } from '../controllers/userController';
-import { checkAuth }       from '../middleware/checkAuth';
+import { checkAuth } from '../middleware/checkAuth';
 import { userRateLimiter } from '../middleware/rateLimiter';
 import { validateRequest } from '../middleware/validateInput';
-
 import {
   updateProfileSchema,
   changePasswordSchema,
   mfaAssociateSchema,
   mfaVerifySchema,
 } from '../middleware/userSchemas';
-import { requireActivated } from '../middleware/requireActivated';   
-
-const csrfProtection = csrf({
-  cookie: {
-    key:     '_csrf',          
-    httpOnly:true,
-    secure:  true,
-    sameSite:'none',
-    path:    '/',              
-    maxAge:  24 * 60 * 60,
-  },
-});
+import { requireActivated } from '../middleware/requireActivated';
+import { csrfProtection } from '../middleware/csrf';
+import { requireMfaDisabled, requireMfaPending } from '../middleware/mfaGuards';
 
 const router = Router();
 
-router.use(checkAuth);        
-router.use(requireActivated); 
-router.use(userRateLimiter);  
-
+router.use(checkAuth);
+router.use(requireActivated);
+router.use(userRateLimiter);
 
 router.get('/profile', UserController.getProfile);
 router.post('/mfa-status', UserController.getMfaStatus);
@@ -49,18 +36,23 @@ router.post(
   UserController.changePassword,
 );
 
-router.post(
-  '/mfa-associate',
+router.post('/mfa-associate',
+  requireMfaDisabled,
   csrfProtection,
   validateRequest(mfaAssociateSchema),
   UserController.mfaAssociate,
 );
 
-router.post(
-  '/mfa-verify',
+router.post('/mfa-verify',
+  requireMfaPending,
   csrfProtection,
   validateRequest(mfaVerifySchema),
   UserController.mfaVerify,
+);
+
+router.post('/mfa-reset',
+  csrfProtection,
+  UserController.resetMfaState,
 );
 
 router.post(

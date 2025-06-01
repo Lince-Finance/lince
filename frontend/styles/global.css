@@ -1,0 +1,48 @@
+@import url("https://fonts.googleapis.com/css2?family=Noto+Sans:ital,wght@0,100..900;1,100..900&display=swap");
+
+html {
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  font-family: "Noto Sans", sans-serif !important;
+  background: #090b0b !important;
+}
+
+.swiper {
+  padding-bottom: 38px !important;
+}
+
+.swiper-pagination-bullet {
+  width: 6px !important;
+  height: 6px !important;
+  background: var(--fg-inverted, #373630) !important;
+  opacity: 1 !important;
+}
+
+.swiper-pagination-bullet-active {
+  width: 16px !important;
+  height: 6px !important;
+  border-radius: var(--radii-full, 9999px) !important;
+  background: #888471 !important;
+}
+
+button {
+  font-family: "Noto Sans", sans-serif !important;
+}
+
+.otp-box input:is(:focus-visible, [data-focus-visible]) {
+  outline-color: #928346 !important;
+}
+
+.radio-indicator {
+  background: transparent !important;
+  border-color: #59502a !important;
+  color: #888471 !important;
+}
+
+.radio-indicator[data-checked] {
+  background: transparent !important;
+  border-color: #59502a !important;
+  color: #888471 !important;
+}

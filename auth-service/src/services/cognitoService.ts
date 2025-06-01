@@ -40,7 +40,6 @@ export async function signUpUser(
   email: string,
   password: string,
   displayName: string,
-  inviteCode = ''
 ) {
     const config = getCognitoConfig();
 
@@ -64,7 +63,6 @@ export async function signUpUser(
         Password: password,
         UserAttributes: userAttributes,
         SecretHash: secretHash,
-        ClientMetadata: inviteCode ? { inviteCode } : undefined,
     });
 
     try {
@@ -137,7 +135,7 @@ export async function signInUser(username: string, password: string) {
       
 }
 
-export async function confirmSignUpUser(email: string, code: string, inviteCode?: string) {
+export async function confirmSignUpUser(email: string, code: string) {
     const config = getCognitoConfig();
     const client = createCognitoClient();
 
@@ -152,7 +150,6 @@ export async function confirmSignUpUser(email: string, code: string, inviteCode?
         Username: email,
         ConfirmationCode: code,
         SecretHash: secretHash,
-        ClientMetadata:   inviteCode ? { inviteCode } : undefined,
     });
     return client.send(cmd);
 }
@@ -260,6 +257,7 @@ export function buildGoogleAuthorizeUrl(state: string, challenge: string) {
   
   export function buildAppleAuthorizeUrl(state: string, challenge: string) {
     const cfg = getCognitoConfig();
+    if (!process.env.APPLE_CLIENT_ID) throw new Error('Apple login disabled');
     const p   = new URLSearchParams({
       response_type: 'code',
       client_id:     cfg.clientId,
@@ -298,6 +296,8 @@ export async function exchangeAuthCode(code: string, verifier: string) {
     }
 
 export async function verifyIdToken(idToken: string): Promise<IdTokenInfo> {
+
+    const { createRemoteJWKSet, jwtVerify } = await import('jose') as typeof import('jose');
     const cfg = getCognitoConfig();
     
     const jwksUri = `https://cognito-idp.${cfg.region}.amazonaws.com/${cfg.userPoolId}/.well-known/jwks.json`;
@@ -333,41 +333,44 @@ export async function verifyIdToken(idToken: string): Promise<IdTokenInfo> {
   }
       
 
-export async function refreshAccessToken(
+  export async function refreshAccessToken(
     refreshToken: string,
+    username: string
   ): Promise<{
     accessToken:  string;
     expiresIn:    number;
     idToken?:     string;
-    refreshToken?:string;           
+    refreshToken?:string;
   }> {
     const cfg    = getCognitoConfig();
     const client = createCognitoClient();
   
-    
     const params: Record<string, string> = { REFRESH_TOKEN: refreshToken };
   
-    
     if (process.env.AWS_CLIENT_SECRET) {
       params.SECRET_HASH = computeSecretHash(
-        'ignored-username',        
+        username,
         cfg.clientId,
         cfg.clientSecret,
       );
     }
   
-    
+    console.log('[refreshAccessToken] params:', params); // ← Añade esto aquí
+  
     const cmd = new AdminInitiateAuthCommand({
-      UserPoolId:  cfg.userPoolId,
-      ClientId:    cfg.clientId,
-      AuthFlow:    AuthFlowType.REFRESH_TOKEN_AUTH,
-      AuthParameters: params,
+      UserPoolId     : cfg.userPoolId,
+      ClientId       : cfg.clientId,
+      AuthFlow       : AuthFlowType.REFRESH_TOKEN_AUTH,
+      AuthParameters : params,
     });
   
     const { AuthenticationResult } = await client.send(cmd);
-    if (!AuthenticationResult?.AccessToken)
-      throw new Error('Cognito did not return AccessToken');
   
+    if (!AuthenticationResult?.AccessToken) {
+      throw new Error('Cognito did not return AccessToken');
+    }
+  
+    /* -------- Respuesta normalizada -------- */
     return {
       accessToken : AuthenticationResult.AccessToken,
       expiresIn   : AuthenticationResult.ExpiresIn ?? 3600,
@@ -375,6 +378,7 @@ export async function refreshAccessToken(
       refreshToken: AuthenticationResult.RefreshToken,
     };
   }
+  
 
   export async function getPasswordPolicy(){
     const cfg = getCognitoConfig();
@@ -384,3 +388,31 @@ export async function refreshAccessToken(
     );
     return UserPool?.Policies?.PasswordPolicy; 
   }
+
+  export async function userExists(
+    email: string,
+  ): Promise<{ exists: boolean; name?: string }> {
+    const cfg    = getCognitoConfig();
+    const client = createCognitoClient();
+  
+    try {
+      const resp = await client.send(
+        new AdminGetUserCommand({
+          UserPoolId: cfg.userPoolId,
+          Username  : email,
+        }),
+      );
+  
+      const nameAttr = resp.UserAttributes?.find(
+        (a) => a.Name === 'name',
+      )?.Value;
+  
+      return { exists: true, name: nameAttr };
+    } catch (e: any) {
+      if (e.name === 'UserNotFoundException')
+        return { exists: false };
+  
+      throw e;
+    }
+  }
+  

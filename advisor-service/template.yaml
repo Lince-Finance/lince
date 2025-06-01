@@ -1,0 +1,210 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Lince Advisor Service
+
+#Esta plantilla hay que desplegarla dos veces, una con el stage api para que cree todo y
+#despues con el stage $default para que actualice el stage de la api
+
+############################################################
+#                     Parámetros                            #
+############################################################
+Parameters:
+  AwsUserPoolId:
+    Type: String
+
+  AwsClientId:
+    Type: String
+
+  Environment:
+    Type: String
+    AllowedValues: [dev, live]
+
+  PrivateSubnetOne:
+    Type: String
+  PrivateSubnetTwo:
+    Type: String
+  LambdaSecurityGroup:
+    Type: String
+
+############################################################
+#                Valores que sí cambian                     #
+############################################################
+Mappings:
+  EnvConfig:
+    dev:  { DomainBase: lince.zone }
+    live: { DomainBase: lince.finance }
+
+############################################################
+#                        Globals                            #
+############################################################
+Globals:
+  Function:
+    Runtime: nodejs18.x
+    Architectures: [arm64]
+    Timeout: 60
+    MemorySize: 512
+    VpcConfig:
+      SubnetIds:        [!Ref PrivateSubnetOne, !Ref PrivateSubnetTwo]
+      SecurityGroupIds: [!Ref LambdaSecurityGroup]
+    Environment:
+      Variables:
+        NODE_ENV:  !Ref Environment
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+        ADVISOR_OPENAI_MODEL: gpt-4o
+
+############################################################
+#                       Recursos                            #
+############################################################
+
+############################################################
+#  IAM Role                                                 #
+############################################################
+Resources:
+  AdvisorFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: SSMReadAdvisorKeys
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParametersByPath
+                Resource: arn:aws:ssm:*:*:parameter/lince/*
+        - PolicyName: KMSDecryptAdvisor
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource:
+                  - !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm
+                  - !ImportValue lince-KmsKeyArn
+        - PolicyName: UsersTableWrite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                Resource:
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/Users
+
+############################################################
+#        HTTP API (v2)                                     #
+############################################################
+  AdvisorHttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      FailOnWarnings: true
+      CorsConfiguration:
+        AllowOrigins:
+          - !Sub ["https://app.${DB}", { DB: !FindInMap [EnvConfig, !Ref Environment, DomainBase] }]
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+          - X-Csrf-Token
+          - X-Refresh-Required
+          - X-Amz-Date
+          - X-Api-Key
+          - X-Amz-Security-Token
+          - Origin
+          - Accept
+        AllowMethods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
+        AllowCredentials: true
+      Auth:
+        #DefaultAuthorizer: CognitoJwt
+        Authorizers:
+          CognitoJwt:
+            JwtConfiguration:
+              issuer: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${AwsUserPoolId}"
+              audience: [!Ref AwsClientId]
+            IdentitySource:
+              #- "$request.cookie.accessToken"
+              - "$request.header.Authorization"
+
+############################################################
+#        Lambda                                            #
+############################################################
+  AdvisorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub lince-advisor-${Environment}
+      Role:         !GetAtt AdvisorFunctionRole.Arn
+      CodeUri:      .
+      Handler:      dist/lambdaHandler.handler
+      Events:
+        AdvisorProxy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AdvisorHttpApi
+            Path: /advisor/{proxy+}
+            Method: ANY
+            #Auth:
+            #  Authorizer: CognitoJwt
+
+############################################################
+#        Custom Domain                                     #
+############################################################
+  #AdvisorHttpApiStage:
+  #  Type: AWS::ApiGatewayV2::Stage
+  #  Properties:
+  #    ApiId: !Ref AdvisorHttpApi
+  #    StageName: api
+  #    AutoDeploy: true
+
+  AdvisorDomainV2:
+    Type: AWS::ApiGatewayV2::DomainName
+    Properties:
+      DomainName: !Sub
+        - advisor.${DB}
+        - { DB: !FindInMap [EnvConfig, !Ref Environment, DomainBase] }
+      DomainNameConfigurations:
+        - CertificateArn: !ImportValue lince-WildcardCertArn
+          EndpointType: REGIONAL
+
+  AdvisorMappingV2:
+    DependsOn: AdvisorHttpApi
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Properties:
+      DomainName: !Ref AdvisorDomainV2
+      ApiId:      !Ref AdvisorHttpApi
+      #Stage:      !Ref AdvisorHttpApiStage
+      Stage: $default
+
+############################################################
+#                       Outputs                             #
+############################################################
+Outputs:
+  AdvisorApiId:
+    Description: HTTP API ID (advisor)
+    Value: !Ref AdvisorHttpApi
+    Export:
+      Name: !Sub LinceAdvisor-${Environment}-ApiId
+
+  AdvisorUrl:
+    Description: Endpoint HTTP API (regional)
+    Value: !Sub https://${AdvisorHttpApi}.execute-api.${AWS::Region}.amazonaws.com
+    Export:
+      Name: !Sub LinceAdvisor-${Environment}-Url
+
+  AdvisorCustomDomain:
+    Description: URL con dominio personalizado
+    Value: !Sub
+      - "https://advisor.${DomainBase}"
+      - { DomainBase: !FindInMap [EnvConfig, !Ref Environment, DomainBase] }
+    Export:
+      Name: !Sub "LinceAdvisor-${Environment}-CustomDomain"

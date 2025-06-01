@@ -2,6 +2,9 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: Lince Auth Service
 
+#Esta plantilla hay que desplegarla dos veces, una con el stage api para que cree todo y
+#despues con el stage $default para que actualice el stage de la api
+
 ############################################################
 #                     Parámetros                            #
 ############################################################
@@ -26,13 +29,24 @@ Parameters:
   UserPoolArnParam:
     Type: String
     Description: "ARN for user pool"
+
   RedisUrlParam:
     Type: String
     Description: 'URL of Redis endpoint (e.g. from SSM)'
 
-############################################################
-#                Valores que SÍ cambian                     #
-############################################################
+  UsersTable:
+    Type: String
+    Default: "Users"
+    Description: "Users table name"
+
+  AwsUserPoolId:              
+    Type: String
+    Description: "Cognito User-Pool ID"
+    
+  AwsClientId:              
+    Type: String
+    Description: "App-client ID del User-Pool"
+
 Mappings:
   EnvConfig:
     dev:
@@ -152,32 +166,38 @@ Resources:
   ##########################################################
   #                     API Gateway                        #
   ##########################################################
-  AuthApi:
-    Type: AWS::Serverless::Api
+
+  AuthHttpApi:
+    Type: AWS::Serverless::HttpApi
     Properties:
-      Name: !Sub 'LinceAuthApi-${Environment}'
-      StageName: !Ref Environment
-      EndpointConfiguration: REGIONAL
-      Cors:
-        AllowOrigin: !Sub
-          - https://app.${Domain}
-          - { Domain: !FindInMap [EnvConfig, !Ref Environment, DomainBase] }
-        AllowMethods: "'OPTIONS,GET,POST,PUT,PATCH,DELETE'"
-        AllowHeaders: "'Content-Type,Authorization,X-Csrf-Token,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,Origin,Accept'"
+      FailOnWarnings: true
+      CorsConfiguration:
+        AllowOrigins:
+          - !Sub ["https://app.${DB}", { DB: !FindInMap [EnvConfig, !Ref Environment, DomainBase] }]
+        AllowHeaders:                      
+          - Content-Type
+          - Authorization
+          - X-XSRF-TOKEN       
+          - X-Csrf-Token        
+          - X-Amz-Date
+          - X-Api-Key
+          - X-Amz-Security-Token
+          - Origin
+          - Accept
+          - X-Requested-With
+        AllowMethods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
         AllowCredentials: true
-      #Auth:
-      #  DefaultAuthorizer: CognitoAuthorizer
-      #  AddDefaultAuthorizerToCorsPreflight: false
-      #  Authorizers:
-      #    CognitoAuthorizer:
-      #      UserPoolArn: arn:aws:cognito-idp:eu-west-1:302263054091:userpool/eu-west-1_W6zT6IwxO
-      #      Identity:
-      #        Header: Authorization
-      MethodSettings:
-        - ResourcePath: /*
-          HttpMethod: "*"
-          ThrottlingBurstLimit: 100
-          ThrottlingRateLimit: 50
+        MaxAge: 600
+      Auth:
+        #DefaultAuthorizer: CognitoJwt
+        Authorizers:
+          CognitoJwt:
+            JwtConfiguration:
+              issuer: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${AwsUserPoolId}"
+              audience: [!Ref AwsClientId]
+            IdentitySource:
+              #- "$request.cookie.accessToken"
+              - "$request.header.Authorization"
 
   ##########################################################
   #                 Función principal                      #
@@ -188,55 +208,77 @@ Resources:
       FunctionName: !Sub 'lince-auth-${Environment}'
       CodeUri: .
       Handler: dist/lambdaHandler.handler
-      Runtime: nodejs18.x
-      Timeout: 60
-      MemorySize: 512
-      VpcConfig:
-        SubnetIds: [!Ref PrivateSubnetOne, !Ref PrivateSubnetTwo]
-        SecurityGroupIds: [!Ref LambdaSecurityGroup]
       Role: !GetAtt AuthFunctionRole.Arn
-      AutoPublishAlias: !Ref Environment
-      ProvisionedConcurrencyConfig:
-        !If
-          - IsLive
-          - ProvisionedConcurrentExecutions: 3 
-          - !Ref 'AWS::NoValue'
+      #ProvisionedConcurrencyConfig:
+      #  !If
+      #    - IsLive
+      #    - ProvisionedConcurrentExecutions: 3 
+      #    - !Ref 'AWS::NoValue'
       Events:                      
-        ApiInvoke:
-          Type: Api
+        PublicRoot:
+          Type: HttpApi
           Properties:
-            RestApiId: !Ref AuthApi
-            Path: /{proxy+}
+            ApiId: !Ref AuthHttpApi
+            Path: /{proxy+}      
             Method: ANY
+            #Auth:
+            #  Authorizer: NONE
+        PublicProxy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AuthHttpApi
+            Path:  /auth/{proxy+}
+            Method: ANY
+            #Auth:
+            #  Authorizer: NONE  
+        UserRoot:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AuthHttpApi
+            Path: /user
+            Method: ANY       
+        PrivateProxy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AuthHttpApi
+            Path:  /user/{proxy+}
+            Method: ANY
+
       Environment:
         Variables:
           USERS_TABLE: !Ref UsersTable
-          REQUIRE_INVITE: !Ref RequireInvite
 
+
+  #AuthHttpApiStage:
+  #  Type: AWS::ApiGatewayV2::Stage
+  #  Properties:
+  #    ApiId: !Ref AuthHttpApi
+  #    StageName: api
+  #    AutoDeploy: true
 
   ##########################################################
   #              Dominio personalizado                     #
   ##########################################################
-  AuthDomainName:
-    Type: AWS::ApiGateway::DomainName
+
+  AuthDomainV2:
+    Type: AWS::ApiGatewayV2::DomainName
     Properties:
       DomainName: !Sub
-        - 'auth.${DB}'
+        - "auth.${DB}"
         - { DB: !FindInMap [EnvConfig, !Ref Environment, DomainBase] }
-      RegionalCertificateArn: !ImportValue lince-WildcardCertArn
-      EndpointConfiguration:
-        Types: [REGIONAL]
+      DomainNameConfigurations:
+        - CertificateArn: !ImportValue lince-WildcardCertArn
+          EndpointType: REGIONAL
 
-  AuthBasePathMapping:
-    Type: AWS::ApiGateway::BasePathMapping
-    DependsOn:
-      - AuthDomainName
-      - AuthApiStage
+  # --------------- API MAPPING --------------
+  AuthMappingV2:
+    DependsOn: AuthHttpApi
+    Type: AWS::ApiGatewayV2::ApiMapping
     Properties:
-      DomainName: !Ref AuthDomainName
-      RestApiId: !Ref AuthApi
-      Stage: !Ref Environment
-
+      DomainName: !Ref AuthDomainV2
+      ApiId: !Ref AuthHttpApi
+      #Stage: !Ref AuthHttpApiStage
+      Stage: $default
 
 ############################################################
 #                       Salidas                             #
@@ -244,15 +286,9 @@ Resources:
 Outputs:
   AuthApiId:
     Description: "API Gateway ID for el servicio Auth"
-    Value: !Ref AuthApi
+    Value: !Ref AuthHttpApi
     Export:
       Name: !Sub "LinceAuth-${Environment}-ApiId"
-
-  AuthUrl:
-    Description: "Endpoint del entorno activo"
-    Value: !Sub
-      - 'https://${ApiId}.execute-api.${AWS::Region}.amazonaws.com/${EnvStage}/'
-      - { ApiId: !Ref AuthApi, EnvStage: !Ref Environment }
 
   CustomDomainUrl:
     Description: "URL del dominio personalizado"

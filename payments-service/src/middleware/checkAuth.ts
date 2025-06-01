@@ -3,15 +3,17 @@ import { CognitoJwtVerifier } from 'aws-jwt-verify';
 import { getCognitoConfig } from '../config/cognitoConfig';
 
 let cachedVerifier: ReturnType<typeof CognitoJwtVerifier.create> | null = null;
+const MIN_SECS_LEFT   = Number(process.env.TOKEN_MIN_TTL ?? 300);
+const ENFORCE_MIN_TTL = process.env.PAYMENTS_ENFORCE_MIN_TTL !== 'false';
 
-function getCognitoVerifier() {
+function getVerifier() {
   if (!cachedVerifier) {
     const { userPoolId, clientId } = getCognitoConfig();
     cachedVerifier = CognitoJwtVerifier.create({
       userPoolId,
       clientId,
       tokenUse: 'access',
-      jwksTtl: 3600,            
+      jwksTtl: 3600,
       cacheJwksInMemory: true,
     });
   }
@@ -23,32 +25,55 @@ export async function checkAuth(
   res: Response,
   next: NextFunction,
 ) {
+  console.log('[checkAuth] ⇢', req.method, req.originalUrl);
+
+  const gwClaims =
+    (req as any).apiGateway?.event?.requestContext?.authorizer?.jwt?.claims;
+
+  if (gwClaims) {
+    console.log('[checkAuth] API-GW claims');
+    (req as any).user = gwClaims;
+    (req as any).token =
+      req.headers.authorization?.replace(/^Bearer\s+/, '') ||
+      req.cookies.accessToken ||
+      '';
+    return next();
+  }
+
   try {
-    const token = req.cookies.accessToken;
-    if (!token) {
+    const accessToken =
+      req.headers.authorization?.replace(/^Bearer\s+/, '') ||
+      req.cookies.accessToken;
+
+    if (!accessToken) {
+      console.log('[checkAuth] ✖ no token');
       return res.status(401).json({ error: 'No token provided' });
     }
 
-    const verifier = getCognitoVerifier();
-    const payload = await verifier.verify(token);   
+    const payload  = await getVerifier().verify(accessToken);
+    const now      = Math.floor(Date.now() / 1000);
+    const secsLeft = payload.exp - now;
+    console.log('[checkAuth] ✔ verified; secsLeft=', secsLeft);
 
-    const now = Math.floor(Date.now() / 1000);
-
-    
-    if (payload.exp < now) {
+    if (secsLeft <= 0) {
+      console.log('[checkAuth] ✖ expired');
       return res.status(401).json({ error: 'Token expired' });
     }
 
-    const secsLeft = payload.exp - now;
-    if (secsLeft < 300)               
-      return res.status(401).json({ error: 'Token about to expire' });
+    if (ENFORCE_MIN_TTL && secsLeft < MIN_SECS_LEFT) {
+      console.log('[checkAuth] ✖ below min TTL', {
+        secsLeft, MIN_SECS_LEFT, ENFORCE_MIN_TTL,
+      });
+      res.setHeader('X-Refresh-Required', 'true');
+      return res.status(403).json({ error: 'Refresh required' });
+    }
 
-
-    
-    (req as any).user = payload;
-    (req as any).token = token;
+    (req as any).user  = payload;
+    (req as any).token = accessToken;
+    console.log('[checkAuth] → ok');
     next();
-  } catch (err) {
+  } catch (e) {
+    console.log('[checkAuth] ✖ verify error', e);
     return res.status(401).json({ error: 'Invalid token' });
   }
 }

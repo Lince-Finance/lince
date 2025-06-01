@@ -1,19 +1,18 @@
 import { Request, Response, NextFunction } from 'express';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
-import { getCognitoConfig } from '../config/cognitoConfig';
+import { getCognitoConfig }   from '../config/cognitoConfig';
 
 let cachedVerifier: ReturnType<typeof CognitoJwtVerifier.create> | null = null;
+const MIN_SECS_LEFT = Number(process.env.TOKEN_MIN_TTL ?? 300);
 
-const MIN_SECS_LEFT = Number(process.env.TOKEN_MIN_TTL ?? 300); 
-
-function getCognitoVerifier() {
+function getVerifier() {
   if (!cachedVerifier) {
     const { userPoolId, clientId } = getCognitoConfig();
     cachedVerifier = CognitoJwtVerifier.create({
       userPoolId,
       clientId,
-      tokenUse: 'access',
-      jwksTtl: 3600,            
+      tokenUse : 'access',
+      jwksTtl  : 3_600,
       cacheJwksInMemory: true,
     });
   }
@@ -25,35 +24,39 @@ export async function checkAuth(
   res: Response,
   next: NextFunction,
 ) {
+  const gwClaims =
+    (req as any).apiGateway?.event?.requestContext?.authorizer?.jwt?.claims;
+
+  if (gwClaims) {
+    (req as any).user  = gwClaims;
+    (req as any).token =
+      req.headers.authorization?.replace(/^Bearer\s+/,'') ||
+      req.cookies.accessToken ||
+      '';
+    return next();
+  }
+
   try {
-    const token = req.cookies.accessToken;
-    if (!token) {
+    const accessToken = req.cookies.accessToken;
+    if (!accessToken) {
       return res.status(401).json({ error: 'No token provided' });
     }
 
-    const verifier = getCognitoVerifier();
-    const payload = await verifier.verify(token);   
+    const payload = await getVerifier().verify(accessToken);
 
     const now = Math.floor(Date.now() / 1000);
-
-    
     if (payload.exp < now) {
       return res.status(401).json({ error: 'Token expired' });
     }
-
-    
     if (payload.exp - now < MIN_SECS_LEFT) {
-      
       res.setHeader('X-Refresh-Required', 'true');
       return res.status(403).json({ error: 'Refresh required' });
     }
 
-
-    
-    (req as any).user = payload;
-    (req as any).token = token;
+    (req as any).user  = payload;
+    (req as any).token = accessToken;
     next();
-  } catch (err) {
+  } catch {
     return res.status(401).json({ error: 'Invalid token' });
   }
 }

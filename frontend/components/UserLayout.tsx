@@ -1,91 +1,103 @@
+"use client";
 
+import { useContext, useEffect, useState } from "react";
+import { useRouter, usePathname } from "next/navigation";
+import { AuthContext } from "@/contexts/AuthContext";
+import { csrfFetch } from "@/utils/fetcher";
+import { invalidateCsrfToken } from "@/utils/csrf";
+import {
+  Box,
+  Button,
+  Flex,
+  Menu,
+  SkeletonCircle,
+  Portal,
+} from "@chakra-ui/react";
+import Head from "next/head";
 
-import React, { useState } from 'react';
-import { useRouter } from 'next/router';
-import { csrfFetch } from '../utils/fetcher';
-import { invalidateCsrfToken } from '../utils/csrf';
-import Head from 'next/head';
-
-interface UserLayoutProps {
+export default function UserLayout({
+  children,
+}: {
   children: React.ReactNode;
-}
-
-export default function UserLayout({ children }: UserLayoutProps) {
+}) {
+  const user = useContext(AuthContext);
   const router = useRouter();
-  const [menuOpen, setMenuOpen] = useState(false);
+  const pathname = usePathname();
+
+  useEffect(() => {
+    if (user === null && pathname?.startsWith("/user")) {
+      router.replace("/auth");
+    }
+  }, [user, pathname, router]);
+
+  if (user === null) return null;
 
   async function handleLogout() {
     try {
-      const baseUrl = process.env.NEXT_PUBLIC_AUTH_BASE_URL;
-      await csrfFetch(`${baseUrl}/auth/logout`, { method: 'POST' });
-      invalidateCsrfToken();
-      router.push('/auth/signIn');
-    } catch (err) {
-      console.error('Logout error:', err);
-      router.push('/auth/signIn');
-    }
-  }
-
-  function toggleMenu() {
-    setMenuOpen(!menuOpen);
+      await csrfFetch(`${process.env.NEXT_PUBLIC_AUTH_BASE_URL}/auth/logout`, {
+        method: "POST",
+      });
+    } catch {}
+    invalidateCsrfToken();
+    router.push("/auth");
   }
 
   return (
     <>
-      <Head key="robots">
+      <Head>
         <meta name="robots" content="noindex" />
       </Head>
 
-      <div style={{ margin: 20 }}>
-        <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          position: 'relative',
-        }}
-      >
-        <button onClick={() => router.push('/user/dashboard')}>
-          Dashboard
-        </button>
-        <div>
-          <button onClick={toggleMenu}>User Menu</button>
-          {menuOpen && (
-            <div
-              style={{
-                position: 'absolute',
-                top: '2.5rem',
-                right: 0,
-                background: '#f0f0f0',
-                border: '1px solid #ccc',
-                padding: '0.5rem',
-              }}
-            >
-              <button
-                style={{ display: 'block', margin: '0.5rem 0' }}
-                onClick={() => {
-                  setMenuOpen(false);
-                  router.push('/user/profile');
-                }}
-              >
-                Profile
-              </button>
-              <button
-                style={{ display: 'block' }}
-                onClick={() => {
-                  setMenuOpen(false);
-                  handleLogout();
-                }}
-              >
-                Logout
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
+      <Box>
+        <Flex
+          as="header"
+          align="center"
+          justify="space-between"
+          position="relative"
+          px={4}
+          py={3}
+          color="white"
+        >
+          <Button
+            variant="ghost"
+            colorScheme="orange"
+            onClick={() => router.push("/user/dashboard")}
+          >
+            Dashboard
+          </Button>
 
-        <main style={{ marginTop: '1rem' }}>{children}</main>
-      </div>
+          <Menu.Root>
+            <Menu.Trigger asChild>
+              <Box as={"button"}>
+                <SkeletonCircle w={10} h={10} rounded={"100%"} />
+              </Box>
+            </Menu.Trigger>
+            <Portal>
+              <Menu.Positioner>
+                <Menu.Content>
+                  <Menu.Item
+                    value="new-txt-a"
+                    onClick={() => router.push("/user/profile")}
+                  >
+                    Profile <Menu.ItemCommand>⌘P</Menu.ItemCommand>
+                  </Menu.Item>
+                  <Menu.Item
+                    as={"button"}
+                    value="new-file-b"
+                    onClick={() => {
+                      handleLogout();
+                    }}
+                  >
+                    Logout <Menu.ItemCommand>⌘L</Menu.ItemCommand>
+                  </Menu.Item>
+                </Menu.Content>
+              </Menu.Positioner>
+            </Portal>
+          </Menu.Root>
+        </Flex>
+
+        <Box as="main">{children}</Box>
+      </Box>
     </>
   );
 }

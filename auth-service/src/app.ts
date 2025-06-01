@@ -9,6 +9,8 @@ import { getAllowedOrigins } from './utils/allowedOrigins';
 import authRoutes            from './routes/authRoutes';
 import userRoutes            from './routes/userRoutes';
 import { csrfRateLimiter }   from './middleware/rateLimiter';
+import { csrfProtection } from './middleware/csrf';
+import { cookieDomain } from './utils/cookieDomain';
 
 
 let CF_CIDRS = [
@@ -60,10 +62,25 @@ app.set('trust proxy', (addr: string, idx: number) =>
   Boolean(addr && isFromCF(addr, idx)),
 );
 
+//app.use((req, _res, next) => {
+//  console.log('[HTTP]', req.method, req.originalUrl);
+//  next();
+//});
+
 app.use((req, _res, next) => {
-  console.log('[HTTP]', req.method, req.originalUrl);
+  const claims =
+    (req as any).apiGateway?.event?.requestContext?.authorizer?.jwt?.claims;
+  if (claims) (req as any).user = claims;
   next();
 });
+
+app.use((req, _res, next) => {
+  console.log('API cookie.len', (req.headers.cookie || '').length);
+  console.log('API hasXSRF?', /XSRF-TOKEN=/.test(req.headers.cookie || ''));
+  console.log('API x-csrf-token', req.headers['x-csrf-token']);
+  next();
+});
+
 
 
 const allowed = new Set(getAllowedOrigins());
@@ -83,7 +100,12 @@ app.use(
     hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
     contentSecurityPolicy: {
       directives: {
-        …
+        defaultSrc: ["'self'"],
+        imgSrc: ["'self'", "data:"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "https://fonts.googleapis.com"],
+        connectSrc: ["'self'"],
+        frameSrc: ["'none'"],
       },
     },
   }),
@@ -93,26 +115,15 @@ app.use(cookieParser());
 app.use(express.json());
 
 
-const csrfProtection = csrf({
-  cookie: {
-    key: '_csrf',
-    httpOnly: true,
-    secure: true,
-    sameSite: 'none',
-    path: '/',
-    maxAge: 24 * 60 * 60,
-  },
-});
-
-
-app.get('/auth/csrf-token', csrfRateLimiter, csrfProtection, (req, res) => {
-  const wantsJson = (req.get('accept') || '').includes('application/json');
-  if (wantsJson) {
-    return res.json({ csrfToken: res.locals._csrf as string });
+app.get('/auth/csrf-token',
+  csrfRateLimiter,
+  csrfProtection,
+  (req, res) => {
+    const token = req.csrfToken();
+    res.setHeader('Cache-Control', 'no-store, private');
+    res.json({ csrfToken: token });
   }
-  res.setHeader('x-csrf-token', res.locals._csrf as string);
-  return res.status(204).end();
-});
+);
 
 
 app.use('/auth', authRoutes);

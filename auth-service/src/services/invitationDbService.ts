@@ -40,7 +40,7 @@ export async function countInvitationsForUser(userId: string): Promise<number> {
         ExpressionAttributeValues: {
             ':u': { S: userId }
         },
-        ConsistentRead: true,
+        //ConsistentRead: false,
         Select: 'COUNT'
     });
     const resp = await ddb.send(cmd);
@@ -55,7 +55,7 @@ export async function getInvitationByCode(inviteCode: string) {
         ExpressionAttributeValues: {
             ':code': { S: inviteCode }
         },
-        ConsistentRead: true,
+        //ConsistentRead: false,
     });
     const resp = await ddb.send(cmd);
 
@@ -128,7 +128,7 @@ export async function getAllInvitationsForUser(userId: string) {
         ExpressionAttributeValues: {
             ':u': { S: userId }
         },
-        ConsistentRead: true,
+        //ConsistentRead: false,
     });
     const resp = await ddb.send(cmd);
     if (!resp.Items) return [];

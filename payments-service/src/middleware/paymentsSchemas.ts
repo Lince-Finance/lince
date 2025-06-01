@@ -10,5 +10,7 @@ export const createUrlSchema = Joi.object({
       currency: Joi.string().lowercase().alphanum().min(2).max(10).required(),
       address : Joi.string().min(20).max(128).required(),           
     })
-  ).min(1).required(),
+  ).min(1)
+  .max(1024)
+  .required(),
 });

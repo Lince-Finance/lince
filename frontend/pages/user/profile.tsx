@@ -1,51 +1,58 @@
-import React, { useEffect, useState } from 'react';
-import { useRouter } from 'next/router';
-import UserLayout from '../../components/UserLayout';
-import { csrfFetch } from '../../utils/fetcher';
-import { withUserSSR } from '../../lib/withUserSSR';
+import React from "react";
+import { useRouter } from "next/router";
+import UserLayout from "../../components/UserLayout";
+import { withUserSSR } from "../../lib/withUserSSR";
+import { useAuth } from "@/contexts/AuthContext";
+import { emailLoginBtnStyles, loginBtnStyles } from "@/styles/reusable-styles";
+import CustomContainer from "@/components/reusable/CustomContainer";
+import { Box, VStack } from "@chakra-ui/react";
+import LoginFormHeading from "@/components/login/login-form-heading";
 
 function ProfilePage() {
   const router = useRouter();
-  const baseUrl = process.env.NEXT_PUBLIC_AUTH_BASE_URL;
-  const [loading, setLoading] = useState(true);
-  const [isMfaEnabled, setIsMfaEnabled] = useState(false);
-  const [msg, setMsg] = useState('');
+  const { user } = useAuth();
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await csrfFetch(`${baseUrl}/user/mfa-status`, {
-          method: 'POST'
-        });
-        const data = await res.json();
-        setIsMfaEnabled(data.isMfaEnabled);
-      } catch (err: any) {
-        setMsg(`Error: ${err.message}`);
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [router]);
+  if (!user) return null;
 
-  if (loading) {
-    return null;
-  }
+  const mfaState = user.mfaEnabled;
 
   return (
     <UserLayout>
-      <h1>User Profile</h1>
-      <p>Información del usuario.</p>
-      {msg && <p>{msg}</p>}
-      <div style={{ marginTop: '1rem' }}>
-        <button onClick={() => router.push('/user/changePassword')}>
-          Change Password
-        </button>
-        {!isMfaEnabled && (
-          <button onClick={() => router.push('/user/mfaAssociate')}>
-            Configure MFA
-          </button>
-        )}
-      </div>
+      <CustomContainer>
+        {/* Top Part */}
+        <Box w={"100%"}>
+          <LoginFormHeading
+            title="User Profile"
+            desc="Account details"
+          />
+
+          <VStack w={"100%"} gap={"2xs"} mt={"2xl"}>
+            <button
+              {...emailLoginBtnStyles}
+              onClick={() => router.push("/user/changePassword")}
+            >
+              Change Password
+            </button>
+
+            {mfaState === false && (
+              <button
+                {...loginBtnStyles}
+                onClick={() => router.push("/user/mfaAssociate")}
+              >
+                Configure MFA
+              </button>
+            )}
+            {mfaState === "PENDING" && (
+              <button
+                {...loginBtnStyles}
+                onClick={() => router.push("/user/mfaVerify")}
+              >
+                Finish MFA setup
+              </button>
+            )}
+          </VStack>
+        </Box>
+      </CustomContainer>
     </UserLayout>
   );
 }

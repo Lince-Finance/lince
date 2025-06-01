@@ -1,56 +1,88 @@
-import type { Handler, Callback } from 'aws-lambda';
-import serverlessExpress          from '@vendia/serverless-express';
-import { loadAppConfig }          from './utils/parameterStore';
+import type {
+  APIGatewayProxyHandlerV2,
+  Handler as LambdaHandler,
+  Callback,
+  Context,
+  APIGatewayProxyEventV2,
+} from 'aws-lambda';
 
-let serverlessExpressInstance: ReturnType<typeof serverlessExpress> | undefined;
+import serverlessExpress from '@vendia/serverless-express';
+import { loadAppConfig } from './utils/parameterStore';
 
+// ────────────────────────────────────────────────────────────
+//  1)  package.json via require  → sin resolveJsonModule
+// ────────────────────────────────────────────────────────────
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const vendiaPkg = require('@vendia/serverless-express/package.json') as {
+  version: string;
+};
 
-async function bootstrap() {
-  
+let serverlessExpressInstance: APIGatewayProxyHandlerV2 | undefined;
+
+async function bootstrap(): Promise<APIGatewayProxyHandlerV2> {
   if (serverlessExpressInstance) return serverlessExpressInstance;
 
-  try {
-    
-    console.time('loadAppConfig');
-    const cfg = await loadAppConfig();
-    console.timeEnd('loadAppConfig');
-    if (!cfg.clientSecret) {
-      throw new Error('FATAL: AWS_CLIENT_SECRET not set');
-    }
+  /* ─── carga parámetros (SSM) ───────────────────────────── */
+  console.time('loadAppConfig');
+  const cfg = await loadAppConfig();
+  console.timeEnd('loadAppConfig');
 
-    process.env.AWS_REGION        = cfg.region;
-    process.env.AWS_USER_POOL_ID  = cfg.userPoolId;
-    process.env.AWS_CLIENT_ID     = cfg.clientId;
-    process.env.AWS_CLIENT_SECRET = cfg.clientSecret;
-    process.env.REDIS_URL         = cfg.redisUrl;
-    process.env.FRONTEND_URL      = cfg.frontendUrl;
-    process.env.COGNITO_DOMAIN    = cfg.cognitoDomain;
-    process.env.REDIRECT_URI      = cfg.redirectUri;
-    process.env.APPLE_TEAM_ID          = cfg.appleTeamId;
-    process.env.APPLE_KEY_ID           = cfg.appleKeyId;
-    process.env.APPLE_CLIENT_ID        = cfg.appleClientId;
-    process.env.APPLE_PRIVATE_KEY_PEM  = cfg.applePrivateKeyPem;
-    process.env.GOOGLE_CLIENT_ID       = cfg.googleClientId;
-    process.env.GOOGLE_CLIENT_SECRET   = cfg.googleClientSecret;
+  if (!cfg.clientSecret) throw new Error('FATAL: AWS_CLIENT_SECRET not set');
 
+  process.env.AWS_REGION           = cfg.region;
+  process.env.AWS_USER_POOL_ID     = cfg.userPoolId;
+  process.env.AWS_CLIENT_ID        = cfg.clientId;
+  process.env.AWS_CLIENT_SECRET    = cfg.clientSecret;
+  process.env.REDIS_URL            = cfg.redisUrl;
+  process.env.FRONTEND_URL         = cfg.frontendUrl;
+  process.env.COGNITO_DOMAIN       = cfg.cognitoDomain;
+  process.env.REDIRECT_URI         = cfg.redirectUri;
+  process.env.GOOGLE_CLIENT_ID     = cfg.googleClientId;
+  process.env.GOOGLE_CLIENT_SECRET = cfg.googleClientSecret;
+  process.env.REQUIRE_INVITE       = cfg.requireInvite ?? 'true';
 
+  const { default: app } = await import('./app');
 
-    
-    const { default: app } = await import('./app');
+  app.use((req, res, next) => {
+    /* res.on('finish') se dispara SIEMPRE que Express entrega la respuesta
+       y es menos intrusivo que parchear res.end directamente             */
+    res.on('finish', () => {
+      // cookies que Express haya puesto  ───────────────────────────────
+      const hdr = res.getHeader('set-cookie');
+      // @ts-expect-error – propiedad que añade express-cookie
+      const signed = res.cookies;
+  
+      console.log(
+        '[diag] FINISH',
+        req.method,
+        req.url,
+        res.statusCode,
+        '\n  set-cookie header →', hdr,
+        '\n  res.cookies      →', signed,
+      );
+    });
+    next();
+  });
 
-    
-    serverlessExpressInstance = serverlessExpress({ app });
-    return serverlessExpressInstance;
+  app.use((req,res,next)=>{
+    res.on('finish',()=>{
+      console.log('[diag] FINISH', req.method, req.url,
+        '\n  request Cookie →', req.headers.cookie,
+        '\n  response Set-Cookie →', res.getHeader('set-cookie'));
+    });
+    next();
+  });
 
-  } catch (err) {
-    
-    console.error('BOOTSTRAP ERROR', err);
-    throw err;
-  }
+  serverlessExpressInstance = serverlessExpress({ app });
+  console.log('[diag] @vendia/serverless-express', vendiaPkg.version);
+  return serverlessExpressInstance;
 }
 
-
-export const handler: Handler = async (event, context, callback: Callback) => {
-  const expressServer = await bootstrap();   
-  return expressServer(event, context, callback);
+/* ─── handler principal ─────────────────────────────────── */
+export const handler: LambdaHandler<
+  APIGatewayProxyEventV2,
+  any
+> = async (event, context: Context, callback: Callback) => {
+  const expressHandler = await bootstrap();
+  return expressHandler(event, context, callback);
 };

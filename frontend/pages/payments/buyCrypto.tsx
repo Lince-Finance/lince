@@ -1,26 +1,26 @@
-
 import React from 'react';
 import UserLayout from '../../components/UserLayout';
-import { withUserSSR, fetchCsrfToken } from '../../lib/withUserSSR';
-import { setInitialCsrfToken } from '../../utils/csrf';
+import { withUserSSR } from '../../lib/withUserSSR';
 
-type BuyCryptoPageProps = {
-  onramperUrl?: string;
-  csrfToken?: string;          
-};
+type BuyCryptoPageProps = { onramperUrl?: string };
 
-function BuyCryptoPage({ onramperUrl = '', csrfToken = '' }: BuyCryptoPageProps) {
-  
+function BuyCryptoPage({ onramperUrl = '' }: BuyCryptoPageProps) {
   React.useEffect(() => {
-    if (csrfToken) setInitialCsrfToken(csrfToken);
-  }, [csrfToken]);
+    fetch(`${process.env.NEXT_PUBLIC_PAYMENTS_BASE_URL}/payments/csrf-token`,
+          { credentials: 'include' }).catch(() => {});
+  }, []);
 
   return (
     <UserLayout>
       <h1>Buy Crypto with Onramper</h1>
 
       {onramperUrl && new URL(onramperUrl).protocol === 'https:' ? (
-        <iframe src={onramperUrl} width="100%" height="600" sandbox="allow-scripts allow-same-origin allow-forms" />
+        <iframe
+          src={onramperUrl}
+          width="100%"
+          height="600"
+          sandbox="allow-scripts allow-same-origin allow-forms"
+        />
       ) : (
         <p>Loading Onramper URL failed or returned empty.</p>
       )}
@@ -30,15 +30,27 @@ function BuyCryptoPage({ onramperUrl = '', csrfToken = '' }: BuyCryptoPageProps)
 
 export const getServerSideProps = withUserSSR(async (ctx) => {
   try {
-    const basePaymentsUrl   = process.env.NEXT_PUBLIC_PAYMENTS_BASE_URL!;
-    const forwardCookies    = ctx.req.headers.cookie || ''; 
-    const { csrfToken: csrf } = ctx as any;
-    const resp = await fetch(`${basePaymentsUrl}/payments/onramper/createUrl`, {
-      method: 'POST',
+    const basePaymentsUrl = process.env.NEXT_PUBLIC_PAYMENTS_BASE_URL!;
+    const clientCookies   = ctx.req.headers.cookie ?? '';
+
+    const csrfResp = await fetch(`${basePaymentsUrl}/payments/csrf-token`, {
+      headers: { cookie: clientCookies },
+    });
+    if (!csrfResp.ok) throw new Error('csrf-token failed');
+    const { csrfToken } = await csrfResp.json();
+    
+    const setCookieHeader = csrfResp.headers.get('set-cookie') ?? '';
+    const firstCookie     = setCookieHeader.split(/,(?=[^;]+?=)/)[0];
+    const xsrfCookiePair  = firstCookie.split(';')[0];
+    const mergedCookies   = [clientCookies, xsrfCookiePair].filter(Boolean).join('; ');
+    
+
+    const createResp = await fetch(`${basePaymentsUrl}/payments/onramper/createUrl`, {
+      method : 'POST',
       headers: {
         'Content-Type': 'application/json',
-        cookie: forwardCookies,
-        'X-Csrf-Token' : csrf,
+        cookie        : mergedCookies,
+        'X-Csrf-Token': csrfToken,
       },
       body: JSON.stringify({
         sourceCurrency: 'usd',
@@ -46,16 +58,19 @@ export const getServerSideProps = withUserSSR(async (ctx) => {
         country:        'us',
         wallets: [
           { currency: 'eth', address: '0xE7dCF29b5B0B4C34AdaA0455F9e670F5F0511109' },
-          { currency: 'sol', address: '3MySoLaNaAddress...' },
+          { currency: 'sol', address: '3MySoLaNaAddressAddressAddress' },
         ],
       }),
     });
 
-    if (!resp.ok) throw new Error(`payments service → ${resp.status}`);
+    if (!createResp.ok)
+      throw new Error(`payments service → ${createResp.status}`);
 
-    const { url } = await resp.json();
-    return { props: { onramperUrl: url ?? '' } };
+    const { url } = await createResp.json();
 
+    return {
+      props: { onramperUrl: url ?? '' },
+    };
   } catch (err) {
     console.error('[buyCrypto] SSR error:', err);
     return { props: { onramperUrl: '' } };

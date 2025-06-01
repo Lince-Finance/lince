@@ -14,21 +14,12 @@ import {
   resetSchema,
   inviteSchema,
 } from '../middleware/authSchemas';
-import { checkAuth }       from '../middleware/checkAuth';
+import { requireAuth } from '../middleware/requireAuth';
 import { getPasswordPolicy } from '../services/cognitoService';
-
-
-const csrfProtection = csrf({
-  cookie: {
-    key:     '_csrf',
-    httpOnly:true,
-    secure:  true,
-    sameSite:'none',
-    path:    '/',
-    maxAge:  24 * 60 * 60,
-  },
-});
-
+import { checkAuth } from '../middleware/checkAuth';
+import { csrfProtection } from '../middleware/csrf';
+import { createEphemeralToken } from '../utils/ephemeralStore';
+import { checkSignupToken } from '../middleware/checkSignupToken';
 
 const router = Router();
 
@@ -39,8 +30,8 @@ router.get('/i/:code', (req, res) => {
   res.cookie('inviteCode', code, {
     httpOnly : true,
     secure   : true,
-    sameSite : 'lax',
-    path     : '/auth',
+    sameSite : 'none',
+    path     : '/',
     maxAge   : 24 * 60 * 60 * 1000,
   });
   return res.redirect('/auth/signUp');
@@ -62,13 +53,21 @@ router.use((req, _res, next) => {
 });
 
 
-router.post('/signup',   csrfProtection, authRateLimiter, validateRequest(signUpSchema),   AuthController.signUp);
+router.post(
+  '/signup',
+  csrfProtection,
+  authRateLimiter,
+  validateRequest(signUpSchema),
+  AuthController.signUp,
+);
+
 router.post('/signin',   csrfProtection, authRateLimiter, validateRequest(signInSchema),   AuthController.signIn);
 router.post('/signinmfa',csrfProtection, authRateLimiter, validateRequest(signInMfaSchema),AuthController.signInMfa);
 router.post(                              
   '/invite',
   csrfProtection,
-  checkAuth,                              
+  checkAuth,
+  checkSignupToken,                              
   validateRequest(inviteSchema),
   AuthController.submitInvite,
 );
@@ -94,6 +93,13 @@ router.get('/google/login',    AuthController.googleLogin);
 router.get('/google/callback', AuthController.googleCallback);
 router.get('/apple/login',     AuthController.appleLogin);
 router.get('/apple/callback',  AuthController.appleCallback);
+
+router.get(
+  '/exists',
+  authRateLimiter,
+  (req, _r, next) => { req.query.email = (req.query.email || '').toString().toLowerCase(); next(); },
+  AuthController.emailExists,
+);
 
 
 router.post('/logout', csrfProtection, AuthController.logout);

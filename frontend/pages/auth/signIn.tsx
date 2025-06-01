@@ -1,90 +1,141 @@
-import React, { useState } from 'react';
-import Link from 'next/link';
-import { useRouter } from 'next/router';
-import AuthLayout from '../../components/AuthLayout';
-import { csrfFetch } from '../../utils/fetcher';
+import React, { useState, useEffect } from "react";
+import Link from "next/link";
+import Router, { useRouter } from "next/router";
+import { Box, Button, Input, Text, HStack } from "@chakra-ui/react";
+
+import AuthLayout from "@/components/AuthLayout";
+import { csrfFetch } from "@/utils/fetcher";
+import { useSignupCreds } from "@/contexts/SignupCredsContext";
+import { redirectIfLogged } from "@/lib/redirectIfLogged";
+import LoginFormHeading from "@/components/login/login-form-heading";
+import {
+  emailInputStyles,
+  emailLoginBtnStyles,
+} from "@/styles/reusable-styles";
 
 export default function SignInPage() {
-  const baseUrl = process.env.NEXT_PUBLIC_AUTH_BASE_URL;
+  const baseUrl = process.env.NEXT_PUBLIC_AUTH_BASE_URL as string;
   const router = useRouter();
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [msg, setMsg] = useState('');
+
+  const { email: qEmail = "", name: qName = "" } = router.query as Record<
+    string,
+    string
+  >;
+
+  const email = qEmail.toString().trim().toLowerCase();
+
+  useEffect(() => {
+    if (!email && router.isReady) router.replace("/auth");
+  }, [email, router]);
+
+  const [password, setPassword] = useState("");
+  const [msg, setMsg] = useState("");
+
+  const { clearCreds } = useSignupCreds();
+  useEffect(clearCreds, []);
 
   async function handleSignIn(e: React.FormEvent) {
     e.preventDefault();
-    setMsg('');
+    setMsg("");
 
     try {
       const res = await csrfFetch(`${baseUrl}/auth/signin`, {
-        method: 'POST',
-        body: JSON.stringify({ email, password })
+        method: "POST",
+        body: JSON.stringify({ email, password }),
       });
-
       const data = await res.json();
-      console.log("FRONT Step1 - signIn response =>", data);
+      console.log("[diag] signin fetch →", data);
 
-      if (data.challenge === 'SOFTWARE_TOKEN_MFA') {
-        router.push('/auth/signInMfa');
-      } else if (data.tokenType) {
-        setMsg('Sign in successful. Redirecting...');
-        setTimeout(() => {
-          router.push('/user/dashboard');
-        }, 1000);
-      } else {
-        setMsg('Unexpected response.');
+      if (data.challenge === "SOFTWARE_TOKEN_MFA") {
+        router.replace(`/auth/signInMfa?email=${encodeURIComponent(email)}`);
+        return;
       }
+
+      if (data.challenge === "UNCONFIRMED") {
+        router.replace(`/auth/confirm?email=${encodeURIComponent(email)}`);
+        return;
+      }
+
+      if (data.tokenType) {
+        if (data.pendingInvite) {
+          router.replace("/auth/invite");
+          return;
+        }
+
+        if (data.pendingOnboarding) {
+          router.replace("/advisor");
+          return;
+        }
+
+        setMsg("Sign-in OK. Redirecting…");
+        const handleStart = () =>
+          Router.events.off("routeChangeStart", handleStart);
+        Router.events.on("routeChangeStart", handleStart);
+        setTimeout(() => router.push("/user/dashboard"), 800);
+        return;
+      }
+
+      setMsg("Unexpected response.");
     } catch (err: any) {
-      console.error('SignIn error =>', err);
       setMsg(`Error: ${err.message}`);
     }
   }
 
   return (
     <AuthLayout>
-      <h1>Sign In</h1>
+      <Box
+        w="100%"
+        maxW="500px"
+        mx="auto"
+        mt={["s", "l"]}
+        px={["m", "2xl"]}
+        pb={["xl", "7xl"]}
+      >
+        <LoginFormHeading
+          title={qName ? `Welcome back, ${qName}` : "Welcome back"}
+          desc="Enter your password to continue"
+        />
 
-      <form onSubmit={handleSignIn}>
-        <div>
-          <label>Email:</label>
-          <input
-            type="email"
-            autoComplete="off"
-            value={email}
-            onChange={e => setEmail(e.target.value)}
-          />
-        </div>
-        <div>
-          <label>Password:</label>
-          <input
+        <Box
+          as="form"
+          onSubmit={handleSignIn}
+          mt={["s", "l"]}
+          display="flex"
+          flexDir="column"
+          gap={["4", "6"]}
+        >
+          <Input
             type="password"
-            autoComplete="off"
+            placeholder="Password"
+            {...emailInputStyles}
             value={password}
-            onChange={e => setPassword(e.target.value)}
+            onChange={(e) => setPassword(e.target.value)}
           />
-        </div>
-        <button type="submit">Sign In</button>
-      </form>
-      {msg && <p>{msg}</p>}
 
-      <div style={{ marginTop: '1rem' }}>
-      <a href={`${process.env.NEXT_PUBLIC_AUTH_BASE_URL}/auth/google/login`}>
-        Sign in with Google
-      </a>
-      <br />
-      <a href={`${process.env.NEXT_PUBLIC_AUTH_BASE_URL}/auth/apple/login`}>
-        Sign in with Apple
-      </a>
-      </div>
+          <Button
+            {...emailLoginBtnStyles}
+            type="submit"
+            disabled={password === ""}
+          >
+            Sign In
+          </Button>
+        </Box>
 
+        {msg && (
+          <Text mt={["2", "4"]} color="grayCliff.solid.400" textAlign="center">
+            {msg}
+          </Text>
+        )}
 
-      <p style={{ marginTop: '1rem' }}>
-        <Link href="/auth/forgot">Forgot your password?</Link>
-      </p>
-
-      <p style={{ marginTop: '1rem' }}>
-        <Link href="/auth/signUp">Register here</Link>
-      </p>
+        <HStack w="100%" justify="space-between" mt={["4", "8"]} fontSize="sm">
+          <Link href={`/auth/forgot?email=${encodeURIComponent(email)}`}>
+            Forgot your password?
+          </Link>
+          <Link href="/auth/signUp">Register here</Link>
+        </HStack>
+      </Box>
     </AuthLayout>
   );
 }
+
+export const getServerSideProps = redirectIfLogged();

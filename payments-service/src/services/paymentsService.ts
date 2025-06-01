@@ -1,5 +1,3 @@
-
-
 import crypto from 'crypto';
 import { getOnramperConfig } from '../config/onramperConfig';
 
@@ -8,6 +6,7 @@ export function createOnramperUrl(params: {
   amount?: number;
   country?: string;
   wallets?: Array<{ currency: string; address: string }>;
+  
 }): string {
   const { apiKey, secretKey, widgetUrl } = getOnramperConfig();
 
@@ -18,6 +17,7 @@ export function createOnramperUrl(params: {
   if (params.sourceCurrency) qs.push(`defaultFiat=${params.sourceCurrency}`);
   if (params.amount)         qs.push(`defaultAmount=${params.amount}`);
 
+  qs.push('themeName=dark');
   
   if (params.wallets?.length) {
     const walletsString = params.wallets

@@ -4,7 +4,7 @@ export const signUpSchema = Joi.object({
     email:       Joi.string().email().required(),
     password:    Joi.string().min(8).required(),
     displayName: Joi.string().min(3).max(40).required(),
-    inviteCode:  Joi.string().min(4).max(20).uppercase().optional(),
+    inviteCode:  Joi.string().min(4).max(20).empty('').uppercase().optional(),
   });
   
   export const inviteSchema = Joi.object({

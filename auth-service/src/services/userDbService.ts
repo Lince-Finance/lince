@@ -71,3 +71,8 @@ export async function attachInviteCode(userId: string, inviteCode: string) {
     },
   }));
 }
+
+export async function isOnboardingDone(userId: string): Promise<boolean> {
+  const row = await getUser(userId);
+  return Boolean(row?.onboardingDone?.BOOL);
+}

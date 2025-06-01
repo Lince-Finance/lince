@@ -11,6 +11,12 @@ export class OnramperController {
             const { sourceCurrency, amount, country, wallets } = req.body;
             console.log('[DEBUG onramperController] Handler called with:', req.body);
 
+            const userId = (req as any).user?.sub ?? 'NO_USER';
+            console.log('[createUrl] user', userId,
+                        'body', JSON.stringify(req.body),
+                        'cookies', req.headers.cookie?.length);
+
+
             const url = createOnramperUrl({
                 sourceCurrency,
                 amount,
@@ -19,6 +25,8 @@ export class OnramperController {
             });
 
             console.log('[DEBUG onramperController] url =>', url);
+            console.log('[createUrl] -> url.length', url.length);
+
             return res.json({ url });
         } catch (err: any) {
             console.error('Error in createOnramperUrl =>', err);

@@ -1,22 +1,22 @@
-
-
 import express, {
   ErrorRequestHandler,
   Request,
   Response,
   NextFunction,
 } from 'express';
-import helmet from 'helmet';
+import helmet       from 'helmet';
 import cookieParser from 'cookie-parser';
-import csrf from 'csurf';
 import cors, { CorsOptionsDelegate } from 'cors';
-import proxyaddr from 'proxy-addr';
+import proxyaddr    from 'proxy-addr';
 
-import { getAllowedOrigins } from './utils/allowedOrigins';
-import onramperRoutes        from './routes/paymentsRoutes';
+import { getAllowedOrigins }  from './utils/allowedOrigins';
+import onramperRoutes         from './routes/paymentsRoutes';
 import { OnramperController } from './controllers/paymentsController';
-import bodyParser       from 'body-parser';
-
+import {
+  csrfProtection,
+  excludePublicWebhook,
+  sendCsrfToken,
+} from './middleware/csrf';
 
 type TrustProxyFn = (addr: string, idx: number) => boolean;
 
@@ -52,10 +52,26 @@ async function refreshCfCidrs(): Promise<void> {
   }
 }
 refreshCfCidrs().catch(() => {});
-setInterval(refreshCfCidrs, 86_400_000).unref();   
-
+setInterval(refreshCfCidrs, 86_400_000).unref();   // 24 h
 
 const app = express();
+
+/* ───── TRACE cada petición + status + ms ─────────────── */
+app.use((req, res, next) => {
+  const t0 = Date.now();
+
+  res.on('finish', () => {
+    console.log(
+      '[TRACE]',
+      req.method,
+      req.originalUrl,
+      '→', res.statusCode,
+      `(${Date.now() - t0} ms)`,
+    );
+  });
+
+  next();
+});
 
 
 app.set('trust proxy',
@@ -66,7 +82,6 @@ app.use((req, _r, next) => {
   console.log('[HTTP]', req.method, req.originalUrl);
   next();
 });
-
 
 const allowed = new Set(getAllowedOrigins());
 const corsOpts: CorsOptionsDelegate<Request> = (req, cb) => {
@@ -79,48 +94,14 @@ const corsOpts: CorsOptionsDelegate<Request> = (req, cb) => {
 app.use(cors(corsOpts));
 app.options('*', cors(corsOpts));
 
-
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 app.use(cookieParser());
 
-
-app.post(
-  '/payments/onramper/webhook',
-  bodyParser.raw({ type: 'application/json' }),  
-  OnramperController.onramperWebhook,
-);
-
 app.use(express.json());
 
+app.get('/payments/csrf-token', csrfProtection, sendCsrfToken);
 
-const csrfProtection = csrf({
-  cookie: {
-    key: '_csrf',
-    httpOnly:true,
-    secure:true,
-    sameSite:'none',
-    path:'/payments',
-    maxAge: 24*60*60,
-  },
-});
-
-
-app.get('/payments/csrf-token', csrfProtection, (_req, res) =>
-  res.json({ csrfToken: res.locals._csrf as string }),
-);
-
-
-
-
-function csrfExclusion(req: Request, _res: Response, next: NextFunction) {
-  const p = req.path.toLowerCase();
-  return (p === '/webhook')
-    ? next()
-    : csrfProtection(req, _res, next);
-}
-
-app.use('/payments/onramper', csrfExclusion, onramperRoutes);
-
+app.use('/payments/onramper', excludePublicWebhook, onramperRoutes);
 
 app.use((_req, res) => res.status(404).json({ error: 'Not Found' }));
 
@@ -132,5 +113,10 @@ const errMw: ErrorRequestHandler = (err, _req, res, _n) => {
   res.status(500).json({ error: err.message ?? 'Internal Server Error' });
 };
 app.use(errMw);
+
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  console.error('[ERR]', err.code, err.message);
+  res.status( err.status || 500 ).json({ error: err.code || 'err' });
+});
 
 export default app;

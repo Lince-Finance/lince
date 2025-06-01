@@ -13,7 +13,8 @@ import {
     exchangeAuthCode, 
     verifyIdToken,
     IdTokenInfo,
-    createCognitoClient
+    createCognitoClient,
+    userExists,
 } from '../services/cognitoService';
 import {
     createEphemeralToken,
@@ -23,15 +24,36 @@ import {
 import { refreshAccessToken } from '../services/cognitoService';
 import { createMfaEphemeralSession, getMfaEphemeralSession, consumeMfaEphemeralSession } from '../utils/mfaEphemeralStore';
 import { getInvitationByCode, markInvitationUsed, transactionAcceptInvite } from '../services/invitationDbService';
-import { putUserIfMissing, attachInviteCode, getUser } from '../services/userDbService';
+import { putUserIfMissing, attachInviteCode, getUser, isOnboardingDone } from '../services/userDbService';
 import { GlobalSignOutCommand } from '@aws-sdk/client-cognito-identity-provider';
 import { cookieDomain } from '../utils/cookieDomain';
+import { getCognitoUsername } from '../utils/getCognitoUsername';
+import { jwtDecode } from 'jwt-decode';
+
 
 
 interface SignInBody {
     email: string;
     password: string;
 }
+
+interface IdPayload {
+  sub: string;
+  'cognito:username'?: string;
+  email?: string;
+}
+
+function clearGhostAccessCookie(res: Response) {
+  res.clearCookie('accessToken', {
+    path: '/',
+  });
+
+  res.clearCookie('accessToken', {
+    domain: cookieDomain(),
+    path  : '/',
+  });
+} 
+
 
 async function timed<T>(label: string, fn: () => Promise<T>): Promise<T> {
     console.time(label);
@@ -43,7 +65,7 @@ function setAuthCookie(res: Response, token: string, maxAgeSecs: number) {
   res.cookie('accessToken', token, {
     httpOnly : true,
     secure   : true,
-    sameSite : 'lax',
+    sameSite : 'none',
     path     : '/',
     domain   : cookieDomain(),
     maxAge   : maxAgeSecs * 1000,
@@ -55,26 +77,17 @@ export class AuthController {
   static async signUp(req: Request, res: Response) {
     try {
       const { email, password, displayName } = req.body as
-        SignInBody & { displayName: string; inviteCode?: string };
+        SignInBody & { displayName: string };  
 
       if (!email || !password)
         return res.status(400).json({ error: 'Missing email or password' });
 
-      const inviteCode = (req.body.inviteCode ||
-                          req.cookies.inviteCode ||
-                          '')
-                          .toString().toUpperCase().trim();
-
       
-      if (process.env.REQUIRE_INVITE === 'true' && !inviteCode)
-        return res.status(400).json({ error: 'inviteCode required' });
-
-      
-      await signUpUser(email, password, displayName, inviteCode);
+      await signUpUser(email, password, displayName);
 
       
       const token = await createEphemeralToken(
-        JSON.stringify({ email, inviteCode }),   
+        JSON.stringify({ email }),   
         10 * 60 * 1000,
       );
 
@@ -82,122 +95,135 @@ export class AuthController {
       res.cookie('signupToken', token, {
         httpOnly : true,
         secure   : true,
-        sameSite : 'lax',
-        path     : '/auth',
+        sameSite : 'none',
+        path     : '/',
         maxAge   : 10 * 60 * 1000,
         domain   : cookieDomain(),
-      });
-
-      res.clearCookie('inviteCode', {
-        httpOnly : true,
-        secure   : true,
-        sameSite : 'lax',
-        path     : '/auth',
       });
       
       return res.status(201).json({
         message: 'User signed up successfully. Check your email for a code.',
+        signupToken: token,
       });
 
     } catch (err: any) {
+      if (err.name === 'UsernameExistsException')
+        return res.status(409).json({
+          error: 'Email already in use.',
+        });
+  
+      if (/already confirmed/i.test(err.message))
+        return res.status(409).json({
+          error: 'Account already confirmed. Sign in.',
+        });
+  
+      if (/password/i.test(err.message))
+        return res.status(400).json({ error: err.message });
+  
       console.error('[signUp]', err);
-      return res.status(400).json({ error: 'Unable to sign-up' });
+      return res.status(500).json({ error: 'Internal error' });
     }
   }
 
+  static async signIn(req: Request, res: Response) {
+    const { email, password } = req.body;
+  
+    try {
+      const cognitoResp = await signInUser(email, password);
+  
+      if (cognitoResp.ChallengeName === 'SOFTWARE_TOKEN_MFA') {
+        const { Session } = cognitoResp;
+        if (!Session) throw new Error('Missing Cognito session for MFA');
+  
+        const token = await createMfaEphemeralSession(
+          email,
+          Session,
+          5 * 60 * 1000,
+        );
+  
+        res.cookie('mfaToken', token, {
+          httpOnly : true,
+          secure   : true,
+          sameSite : 'none',
+          path     : '/',
+          domain   : cookieDomain(),
+          maxAge   : 5 * 60 * 1000,
+        });
 
-    static async signIn(req: Request, res: Response) {
+        clearGhostAccessCookie(res);
+        res.clearCookie('idToken',     { path:'/', sameSite:'none', domain:cookieDomain() });
+        res.clearCookie('refreshToken',{ path:'/', sameSite:'none', domain:cookieDomain() });
+        res.clearCookie('username',    { path:'/', sameSite:'none', domain:cookieDomain() });
+  
+        return res.json({ challenge: 'SOFTWARE_TOKEN_MFA' });
+      }
+  
+
+      if (cognitoResp.AuthenticationResult?.AccessToken) {
+        const {
+          AccessToken,
+          IdToken,
+          RefreshToken,
+          ExpiresIn = 3600,
+        } = cognitoResp.AuthenticationResult;
+
+        let pendingOnboarding = true;
         try {
-            console.log("==== signIn route START ====");
-            const { email, password } = req.body;
-            if (!email || !password) {
-                return res.status(400).json({ error: 'Missing email or password' });
-            }
-
-            const cognitoResp = await signInUser(email, password);
-
-            if (cognitoResp.ChallengeName === 'SOFTWARE_TOKEN_MFA') {
-                const mfaToken = await createMfaEphemeralSession(
-                    email,
-                    cognitoResp.Session!,
-                    5 * 60 * 1000
-                );
-                
-                res.cookie('mfaToken', mfaToken, {
-                    httpOnly : true,
-                    secure   : true,
-                    sameSite : 'lax',
-                    path     : '/auth',
-                    maxAge   : 5 * 60 * 1000,
-                });
-
-                return res.json({
-                    challenge: 'SOFTWARE_TOKEN_MFA',
-                    message  : 'MFA required',
-                });
-            }
-            else if (cognitoResp.ChallengeName === 'UNCONFIRMED') {
-                
-                return res.status(400).json({ error:'Invalid email or password' });
-            }
-              
-              else if (cognitoResp.AuthenticationResult?.AccessToken) {
-                const {
-                  AccessToken: accessToken,      
-                  RefreshToken,
-                  ExpiresIn,
-                  TokenType,
-                } = cognitoResp.AuthenticationResult!;
-              
-                const { getCognitoConfig } = await import('../config/cognitoConfig');
-                const { CognitoJwtVerifier } = await import('aws-jwt-verify');
-
-                const { userPoolId, clientId } = getCognitoConfig();
-                const verifier = CognitoJwtVerifier.create({ userPoolId, clientId, tokenUse:'access' });
-                const payload  = await verifier.verify(accessToken);
-                const userId   = payload.sub as string;
-              
-                
-                let pendingInvite = false;
-                try {
-                  const row = await getUser(userId);
-                  pendingInvite = !row?.inviteCode?.S;     
-                } catch { }
-              
-                
-                if (process.env.REQUIRE_INVITE === 'true' && pendingInvite) {
-                  return res.status(403).json({ error: 'Invite pending' });
-                }
-
-                setAuthCookie(res, accessToken, ExpiresIn ?? 3600);
-
-                
-                if (RefreshToken) {
-                    res.cookie('refreshToken', RefreshToken, {
-                        httpOnly: true,
-                        secure: true,
-                        sameSite: 'lax',
-                        path: '/',
-                        domain: cookieDomain(),
-                        maxAge: 30 * 24 * 3600_000,        
-                });
-                }
-
-                return res.json({
-                    message: 'User signed in',
-                    tokenType: TokenType,
-                    expiresIn: ExpiresIn,
-                    pendingInvite,
-                });
-            } else {
-                return res.status(400).json({ error: 'Unexpected challenge' });
-            }
-
-        } catch (error: any) {
-            console.error('[signIn]', error);
-            return res.status(400).json({ error: 'Invalid email or password' });
+          const { sub: userId } = jwtDecode<IdPayload>(IdToken);
+          pendingOnboarding = !(await isOnboardingDone(userId));
+        } catch {}
+  
+        res.cookie('accessToken', AccessToken, {
+          httpOnly:true, secure:true, sameSite:'none',
+          path:'/', domain:cookieDomain(), maxAge:ExpiresIn * 1000,
+        });
+  
+        res.cookie('idToken', IdToken, {
+          httpOnly:true, secure:true, sameSite:'none',
+          path:'/', domain:cookieDomain(), maxAge:ExpiresIn * 1000,
+        });
+  
+        if (RefreshToken) {
+          res.cookie('refreshToken', RefreshToken, {
+            httpOnly:true, secure:true, sameSite:'none',
+            path:'/', domain:cookieDomain(), maxAge:30 * 24 * 3600_000,
+          });
         }
+  
+        res.cookie('username', email, {
+          httpOnly:true, secure:true, sameSite:'none',
+          path:'/', domain:cookieDomain(), maxAge:30 * 24 * 3600_000,
+        });
+  
+        return res.json({
+          message     : 'Sign in successful',
+          tokenType   : 'Bearer',
+          username    : email,
+          accessToken : AccessToken,
+          idToken     : IdToken,
+          refreshToken: RefreshToken,
+          pendingOnboarding,
+        });
+      }
+  
+      return res.status(401).json({ error: 'Incorrect username or password' });
+  
+    } catch (err: any) {
+
+      if (err.name === 'NotAuthorizedException') {
+        console.warn('[signIn] Cognito NotAuthorizedException', {
+          email,
+          ip: req.ip,
+          reason: err.message,
+        });
+        return res.status(401).json({ error: 'Incorrect username or password' });
+      }
+  
+      console.error('[signIn] Internal error', err);
+      return res.status(500).json({ error: 'Internal error' });
     }
+  }
+
 
     static async confirm(req: Request, res: Response) {
       const { token, code } = req.body;
@@ -208,20 +234,12 @@ export class AuthController {
         const payloadStr = await validateEphemeralToken(token);
         if (!payloadStr) throw new Error('Invalid/expired token');
   
-        const { email, inviteCode = '' } = JSON.parse(payloadStr);
+        const { email } = JSON.parse(payloadStr);
         if (!email) throw new Error('Malformed token payload');
   
         
-        await confirmSignUpUser(email, code, inviteCode || undefined);
+        await confirmSignUpUser(email, code);
   
-        await consumeEphemeralToken(token);
-        res.clearCookie('signupToken', {          
-          httpOnly : true,
-          secure   : true,
-          sameSite : 'lax',
-          path     : '/auth',
-          domain   : cookieDomain(),
-        });
         return res.json({ message: 'Email confirmed. Sign-in to continue.' });
   
       } catch (err: any) {
@@ -257,8 +275,8 @@ export class AuthController {
         res.clearCookie('inviteCode', {
           httpOnly : true,
           secure   : true,
-          sameSite : 'lax',
-          path     : '/auth',
+          sameSite : 'none',
+          path     : '/',
         });
     
         
@@ -357,31 +375,37 @@ export class AuthController {
             const resp = await respondToMfaChallenge(session, email, totpCode);  
 
             if (resp.AuthenticationResult?.AccessToken) {
-                await consumeMfaEphemeralSession(mfaToken);
+              clearGhostAccessCookie(res);
 
-                const {
-                  AccessToken: accessToken,     
-                  RefreshToken,
-                  ExpiresIn,
-                } = resp.AuthenticationResult;  
-
-                
-                setAuthCookie(res, accessToken, ExpiresIn ?? 3600);
-
-                if (RefreshToken) {
-                    res.cookie('refreshToken', RefreshToken, {
-                        httpOnly: true,
-                        secure: true,
-                        sameSite: 'lax',
-                        path: '/',
-                        domain: cookieDomain(),
-                        maxAge: 30 * 24 * 3600_000,
-                    });
-                }
-
-                return res.status(200).json({
-                    message: 'MFA verified'
+              const auth = resp.AuthenticationResult!;        
+              const accessToken  = auth.AccessToken!;         
+              const idToken      = auth.IdToken!;            
+              const refreshToken = auth.RefreshToken;        
+              const expiresIn    = auth.ExpiresIn ?? 3600;    
+            
+              res.cookie('idToken', idToken, {
+                httpOnly : true,
+                secure   : true,
+                sameSite : 'none',
+                path     : '/',
+                domain   : cookieDomain(),
+                maxAge: (expiresIn ?? 3600) * 1000,
+              });
+            
+              setAuthCookie(res, accessToken, expiresIn);
+            
+              if (refreshToken) {
+                res.cookie('refreshToken', refreshToken, {
+                  httpOnly : true,
+                  secure   : true,
+                  sameSite : 'none',
+                  path     : '/',
+                  domain   : cookieDomain(),
+                  maxAge   : 30 * 24 * 3600_000,
                 });
+              }
+            
+              return res.status(200).json({ message: 'MFA verified' });
             } else {
                 return res.status(400).json({ error: 'MFA verification failed' });
             }
@@ -393,57 +417,74 @@ export class AuthController {
     }
 
     static async logout(req: Request, res: Response) {
+      console.log('[logout] accessToken:', req.cookies.accessToken);
       try {
         const accessToken = req.cookies.accessToken;   
         if (accessToken) {
-            const client = createCognitoClient();
-            await client.send(
+          const client = createCognitoClient();
+          await client.send(
             new GlobalSignOutCommand({ AccessToken: accessToken })
-            );
+          );
+        } else {
+          console.warn('[logout] No accessToken found in cookies');
         }
-        } catch {}
-        res.clearCookie('accessToken',  {
-          path:'/', sameSite:'lax', domain:cookieDomain(),
-        });
-        res.clearCookie('refreshToken', {
-          path:'/', sameSite:'lax', domain:cookieDomain(),
-        });
-
-        return res.json({ message: 'Logged out' });
+      } catch (err) {
+        console.error('[logout] Error in GlobalSignOut:', err);
       }
+      clearGhostAccessCookie(res);
+      res.clearCookie('idToken',     { path:'/', sameSite:'none', domain:cookieDomain() });
+      res.clearCookie('refreshToken',{ path:'/', sameSite:'none', domain:cookieDomain() });
+      return res.json({ message: 'Logged out' });
+    }
 
       
-      static async refresh(req: Request, res: Response) {
+    static async refresh(req: Request, res: Response) {
+      const refresh = req.cookies.refreshToken;
+      if (!refresh) {
+        return res.status(400).json({ error: 'Missing refresh token' });
+      }
+  
+      let username = '';
+      const rawId = req.cookies.idToken;
+      if (rawId) {
         try {
-        const refresh = req.cookies.refreshToken;
-        if (!refresh)
-          return res.status(401).json({ error: 'No refresh token' });
-
-        const tokens = await refreshAccessToken(refresh);
-
-        
-        setAuthCookie(res, tokens.accessToken, tokens.expiresIn);
-
-        
-        if (tokens.refreshToken) {
-          res.cookie('refreshToken', tokens.refreshToken, {
-            httpOnly : true,
-            secure   : true,
-            sameSite : 'lax',
-            path     : '/',
-            domain   : cookieDomain(),
-            maxAge   : 30 * 24 * 3600_000,   
-          });
+          const payload: any = jwtDecode(rawId);
+          username = payload['cognito:username'] || payload.username || payload.sub || '';
+        } catch {
+          console.log('[refresh] Failed to decode idToken');
         }
-
-        return res.json({ ok: true });
-      } catch (err:any) {
-        console.error('[refresh]', err);
-        
-        res.clearCookie('accessToken',  { path:'/',  });
-        res.clearCookie('refreshToken', { path:'/', });
-        return res.status(401).json({ error: 'Refresh failed' });
-        }
+      }
+      if (!username) {
+        username = req.cookies.username || '';
+      }
+      if (!username) {
+        return res.status(400).json({ error: 'Cannot determine username for refresh' });
+      }
+  
+      console.log('[refresh] username for refresh:', username);
+      const tokens = await refreshAccessToken(refresh, username);
+      console.log('[refresh] tokens received:', tokens);
+  
+      if (tokens.accessToken) {
+        res.cookie('accessToken', tokens.accessToken, {
+          httpOnly: true,
+          secure: true,
+          sameSite: 'none',
+          path: '/',
+          domain: cookieDomain(),
+          maxAge: 3600_000,
+        });
+        res.cookie('idToken', tokens.idToken, {
+          httpOnly: true,
+          secure: true,
+          sameSite: 'none',
+          path: '/',
+          domain: cookieDomain(),
+          maxAge: 3600_000,
+        });
+        return res.status(200).json({ message: 'Token refreshed' });
+      }
+      return res.status(401).json({ error: 'Refresh failed' });
     }
       
       
@@ -479,7 +520,7 @@ export class AuthController {
         setAuthCookie(res, tokens.access_token, tokens.expires_in);
         if (tokens.refresh_token) {
             res.cookie('refreshToken', tokens.refresh_token, {
-                httpOnly:true, secure:true, sameSite:'lax',
+                httpOnly:true, secure:true, sameSite:'none',
                 path:'/', maxAge:30*24*3600_000,
                 domain: cookieDomain(),
             });
@@ -514,7 +555,7 @@ export class AuthController {
         setAuthCookie(res, tokens.access_token, tokens.expires_in);
         if (tokens.refresh_token) {
             res.cookie('refreshToken', tokens.refresh_token, {
-                httpOnly:true, secure:true, sameSite:'lax',
+                httpOnly:true, secure:true, sameSite:'none',
                 path:'/', maxAge:30*24*3600_000,
                 domain: cookieDomain(),
             });
@@ -525,5 +566,22 @@ export class AuthController {
         return res.status(400).json({ error: err.message });
         }
     }
+
+    static async emailExists(req: Request, res: Response) {
+      const email = (req.query.email as string || '').toLowerCase().trim();
+      if (!email) return res.status(400).json({ error: 'Missing email' });
+    
+      try {
+        const { exists, name } = await userExists(email);   
+    
+        if (!exists) return res.status(404).json({ error: 'Not found' }); 
+    
+        return res.json({ exists: true, name });            
+      } catch (e: any) {
+        console.error('[emailExists]', e);
+        return res.status(500).json({ error: 'Internal error' });
+      }
+    }
+    
 
 }

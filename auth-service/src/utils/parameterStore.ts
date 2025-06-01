@@ -57,6 +57,7 @@ export async function loadAppConfig() {
     appleKeyId,
     appleClientId,
     applePrivateKeyPem,
+    requireInvite,
   ] = await Promise.all([
     getParam('/lince/AWS_REGION'),
     getParam('/lince/AWS_USER_POOL_ID'),
@@ -72,10 +73,10 @@ export async function loadAppConfig() {
     getParam('/lince/APPLE_KEY_ID'),
     getParam('/lince/APPLE_CLIENT_ID'),
     getParam('/lince/APPLE_PRIVATE_KEY_PEM'),
-
+    getParam('/lince/REQUIRE_INVITE'),
   ]);
 
   console.timeEnd('loadAppConfig total');
 
-  return { region, userPoolId, clientId, clientSecret, redisUrl, frontendUrl, cognitoDomain, redirectUri, googleClientId, googleClientSecret, appleTeamId, appleKeyId, appleClientId, applePrivateKeyPem };
+  return { region, userPoolId, clientId, clientSecret, redisUrl, frontendUrl, cognitoDomain, redirectUri, googleClientId, googleClientSecret, appleTeamId, appleKeyId, appleClientId, applePrivateKeyPem, requireInvite };
 }

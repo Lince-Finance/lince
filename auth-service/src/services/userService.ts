@@ -6,7 +6,7 @@ import {
     CognitoIdentityProviderClient,
     GetUserCommand
 } from '@aws-sdk/client-cognito-identity-provider';
-import { updateUser } from './userDbService';
+import { updateUser, getUser } from './userDbService';
 
 
 function createCognitoClient() {
@@ -18,22 +18,43 @@ function createCognitoClient() {
 
 interface UpdateProfileInput {
     displayName?: string;
+    riskProfile?: 'CONSERVATIVE' | 'MODERATE' | 'AGGRESSIVE';
 }
 
 export class UserService {
     static async getUserProfile(userId: string) {
+        const user = await getUser(userId);
+        if (!user) {
+            throw new Error('User not found');
+        }
+        const parseMfaState = (mfaField: any): boolean | 'PENDING' => {
+            if (!mfaField) return false;
+            if ('BOOL' in mfaField) return mfaField.BOOL;
+            if ('S' in mfaField) {
+                if (mfaField.S === 'PENDING') return 'PENDING';
+                return mfaField.S === 'true';
+            }
+            return false;
+        };
+
         return {
-            userId,
-            email: `demo-${userId}@example.com`,
-            displayName: 'Demo User from Service'
+            userId: user.userId.S,
+            email: user.email.S,
+            displayName: user.displayName?.S || '',
+            riskProfile: user.riskProfile?.S,
+            onboardingDone: user.onboardingDone?.BOOL || false,
+            mfaEnabled: parseMfaState(user.mfaEnabled),
         };
     }
     static async updateUserProfile(userId: string, data: UpdateProfileInput) {
-        return {
-            userId,
-            email: `demo-${userId}@example.com`,
-            displayName: data.displayName || 'Default Name'
-        };
+        const updates: Record<string, any> = {};
+        if (data.displayName) updates.displayName = data.displayName;
+        if (data.riskProfile) updates.riskProfile = data.riskProfile;
+        
+        if (Object.keys(updates).length > 0) {
+            await updateUser(userId, updates);
+        }
+        return this.getUserProfile(userId);
     }
 
     static async changePassword(accessToken: string, oldPassword: string, newPassword: string) {

@@ -10,7 +10,7 @@ export function cacheInviteFromUrl() {
       'Path=/auth',
       'Max-Age=' + 7*24*3600,
       'HttpOnly',
-      'SameSite=Lax',
+      'SameSite=none',
       'Secure',
       'Priority=High',
     ].join(';');

@@ -2,10 +2,19 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: Lince Payments Service
 
+#Esta plantilla hay que desplegarla dos veces, una con el stage api para que cree todo y
+#despues con el stage $default para que actualice el stage de la api
+
 ############################################################
 #                     Parámetros                            #
 ############################################################
 Parameters:
+  AwsUserPoolId:
+    Type: String
+
+  AwsClientId:
+    Type: String
+
   Environment:
     Type: String
     AllowedValues: [dev, live]
@@ -30,10 +39,10 @@ Mappings:
 ############################################################
 Globals:
   Function:
-    Runtime:       nodejs18.x
+    Runtime: nodejs18.x
     Architectures: [arm64]
-    Timeout:       60
-    MemorySize:    512
+    Timeout: 60
+    MemorySize: 512
     VpcConfig:
       SubnetIds:        [!Ref PrivateSubnetOne, !Ref PrivateSubnetTwo]
       SecurityGroupIds: [!Ref LambdaSecurityGroup]
@@ -41,6 +50,7 @@ Globals:
       Variables:
         NODE_ENV:  !Ref Environment
         AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+        PAYMENTS_ENFORCE_MIN_TTL: 'false'
 
 ############################################################
 #                       Recursos                            #
@@ -48,7 +58,7 @@ Globals:
 Resources:
 
   ##########################################################
-  #     Role / permisos                                    #
+  #  IAM Role                                              #
   ##########################################################
   PaymentsFunctionRole:
     Type: AWS::IAM::Role
@@ -71,8 +81,7 @@ Resources:
                 Action:
                   - ssm:GetParameter
                   - ssm:GetParametersByPath
-                Resource: "arn:aws:ssm:*:*:parameter/lince/*"
-
+                Resource: arn:aws:ssm:*:*:parameter/lince/*
         - PolicyName: KMSDecryptPayments
           PolicyDocument:
             Version: '2012-10-17'
@@ -80,88 +89,111 @@ Resources:
               - Effect: Allow
                 Action: kms:Decrypt
                 Resource:
-                  - !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm'
+                  - !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm
                   - !ImportValue lince-KmsKeyArn
 
   ##########################################################
-  #                     API Gateway                        #
+  #        HTTP API (v2)                                   #
   ##########################################################
-  PaymentsApi:
-    Type: AWS::Serverless::Api
+  PaymentsHttpApi:
+    Type: AWS::Serverless::HttpApi
     Properties:
-      Name:      !Sub 'LincePaymentsApi-${Environment}'
-      StageName: !Ref Environment
-      EndpointConfiguration: REGIONAL
-      Cors:
-        AllowMethods:  "'OPTIONS,GET,POST,PUT,PATCH,DELETE'"
-        AllowHeaders:  "'Content-Type,Authorization,X-Csrf-Token,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,Origin,Accept'"
-        AllowOrigin:   !Sub
-          - https://app.${DomainBase}
-          - DomainBase: !FindInMap [EnvConfig, !Ref Environment, DomainBase]
+      FailOnWarnings: true
+      CorsConfiguration:
+        AllowOrigins:
+          - !Sub ["https://app.${DB}", { DB: !FindInMap [EnvConfig, !Ref Environment, DomainBase] }]
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+          - X-Csrf-Token
+          - X-Refresh-Required
+          - X-Amz-Date
+          - X-Api-Key
+          - X-Amz-Security-Token
+          - Origin
+          - Accept
+        AllowMethods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
         AllowCredentials: true
-      MethodSettings:
-        - ResourcePath: "/*"
-          HttpMethod:   "*"
-          ThrottlingBurstLimit: 100
-          ThrottlingRateLimit:  50
+      Auth:
+        #DefaultAuthorizer: CognitoJwt
+        Authorizers:
+          CognitoJwt:
+            JwtConfiguration:
+              issuer: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${AwsUserPoolId}"
+              audience: [!Ref AwsClientId]
+            IdentitySource:
+              #- "$request.cookie.accessToken"
+              - "$request.header.Authorization"
 
   ##########################################################
-  #                 Función principal                      #
+  #        Lambda                                          #
   ##########################################################
   PaymentsFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: !Sub 'lince-payments-${Environment}'
+      FunctionName: !Sub lince-payments-${Environment}
       Role:         !GetAtt PaymentsFunctionRole.Arn
       CodeUri:      .
       Handler:      dist/lambdaHandler.handler
       Events:
-        ApiInvoke:
-          Type: Api
+        PublicProxy:
+          Type: HttpApi
           Properties:
-            RestApiId: !Ref PaymentsApi
-            Path:      /{proxy+}
-            Method:    ANY
+            ApiId: !Ref PaymentsHttpApi
+            Path:  /payments/{proxy+}
+            Method: ANY
+            #Auth:
+            #  Authorizer: CognitoJwt
 
   ##########################################################
-  #              Dominio personalizado                     #
+  #        Custom Domain                                   #
   ##########################################################
-  PaymentsDomainName:
-    Type: AWS::ApiGateway::DomainName
+  #PaymentsHttpApiStage:
+  #  Type: AWS::ApiGatewayV2::Stage
+  #  Properties:
+  #    ApiId: !Ref PaymentsHttpApi
+  #    StageName: api
+  #    AutoDeploy: true
+  
+  PaymentsDomainV2:
+    Type: AWS::ApiGatewayV2::DomainName
     Properties:
       DomainName: !Sub
-        - 'payments.${DomainBase}'
-        - DomainBase: !FindInMap [EnvConfig, !Ref Environment, DomainBase]
-      RegionalCertificateArn: !ImportValue lince-WildcardCertArn
-      EndpointConfiguration:
-        Types: [REGIONAL]
+        - payments.${DB}
+        - { DB: !FindInMap [EnvConfig, !Ref Environment, DomainBase] }
+      DomainNameConfigurations:
+        - CertificateArn: !ImportValue lince-WildcardCertArn
+          EndpointType: REGIONAL
 
-  PaymentsBasePathMapping:
-    Type: AWS::ApiGateway::BasePathMapping
-    DependsOn: [PaymentsDomainName, PaymentsApi]
+  PaymentsMappingV2:
+    DependsOn: PaymentsHttpApi
+    Type: AWS::ApiGatewayV2::ApiMapping
     Properties:
-      DomainName: !Ref PaymentsDomainName
-      RestApiId:  !Ref PaymentsApi
-      Stage:      !Ref Environment
+      DomainName: !Ref PaymentsDomainV2
+      ApiId:      !Ref PaymentsHttpApi
+      #Stage:      !Ref PaymentsHttpApiStage
+      Stage: $default
 
 ############################################################
-#                       Salidas                            #
+#                       Outputs                             #
 ############################################################
 Outputs:
   PaymentsApiId:
-    Description: API Gateway ID (payments)
-    Value: !Ref PaymentsApi
+    Description: HTTP API ID (payments)
+    Value: !Ref PaymentsHttpApi
     Export:
-      Name: !Sub 'LincePayments-${Environment}-ApiId'
+      Name: !Sub LincePayments-${Environment}-ApiId
 
   PaymentsUrl:
-    Description: Endpoint regional
-    Value: !Sub 'https://${PaymentsApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/'
+    Description: Endpoint HTTP API (regional)
+    Value: !Sub https://${PaymentsHttpApi}.execute-api.${AWS::Region}.amazonaws.com
     Export:
-      Name: !Sub 'LincePayments-${Environment}-Url'
+      Name: !Sub LincePayments-${Environment}-Url
 
   PaymentsCustomDomain:
     Description: URL con dominio personalizado
     Value: !Sub
-      - 'https://payments.${DomainBase}'
-      - DomainBase: !FindInMap [EnvConfig, !Ref Environment, DomainBase]
+      - "https://payments.${DomainBase}"
+      - { DomainBase: !FindInMap [EnvConfig, !Ref Environment, DomainBase] }
+    Export:
+      Name: !Sub "LincePayments-${Environment}-CustomDomain"
